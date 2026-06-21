@@ -10,6 +10,7 @@ import { execFile } from 'child_process';
 import { shell, dialog, clipboard, nativeImage, BrowserWindow } from 'electron';
 import type { BridgeFactory, BridgeContext } from '../types';
 import { toWeb } from '../eventtarget';
+import { downloadsDir, cachedPath, ensureCacheTable, expectDownload, awaitDownload } from '../mediaDownloads';
 
 // ─── Shared utilities ─────────────────────────────────────────────────────────
 
@@ -27,18 +28,6 @@ function fileExt(filename: string): string {
   return (path.extname(String(filename)) || '').slice(1).toLowerCase();
 }
 
-/**
- * Weekly bucket name: "<year>-<weekOfYear 02d>".
- * Mirrors WA's GetTransfersFolder — weekOfYear = DayOfYear/7 + 1 (doc 40 §3.2.3).
- */
-function weekBucket(): string {
-  const now = new Date();
-  const dayOfYear =
-    Math.floor((now.getTime() - new Date(now.getFullYear(), 0, 1).getTime()) / 86_400_000) + 1;
-  const week = String(Math.floor(dayOfYear / 7) + 1).padStart(2, '0');
-  return `${now.getFullYear()}-${week}`;
-}
-
 // ─── MediaFilesBridge ─────────────────────────────────────────────────────────
 // doc 40 §3.2; catalog #16.
 // All 9 methods are async-by-return-type (IAsyncOperation<T>/IAsyncAction) in WinRT
@@ -46,49 +35,14 @@ function weekBucket(): string {
 // is safe via Electron contextBridge even under defaultSyncProxy=true routing.
 
 function mediaFilesBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
-  const transfersRoot = path.join(ctx.userDataDir, 'transfers');
-  ensureDir(transfersRoot);
-
-  // Schema mirrors SqliteMediaFilesStorage.CompletedDownloads2 (doc 40 §3.2.6).
-  // Keyed on (hash, ext) so the same content can be cached under multiple extensions.
-  const cacheDb = () => {
-    const db = ctx.nativeDb();
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS media_cache (
-        hash TEXT NOT NULL,
-        ext  TEXT NOT NULL,
-        path TEXT NOT NULL,
-        PRIMARY KEY (hash, ext)
-      );
-      CREATE INDEX IF NOT EXISTS idx_media_cache_hash ON media_cache(hash);
-    `);
-    return db;
-  };
-
-  /** Look up a cached path; prunes stale DB rows when the file is missing. */
-  function cachedPath(hash: string, ext: string): string | undefined {
-    const row = cacheDb()
-      .prepare('SELECT path FROM media_cache WHERE hash=? AND ext=?')
-      .get(hash, ext) as { path: string } | undefined;
-    if (!row) return undefined;
-    if (!fs.existsSync(row.path)) {
-      cacheDb().prepare('DELETE FROM media_cache WHERE hash=? AND ext=?').run(hash, ext);
-      return undefined;
-    }
-    return row.path;
-  }
-
-  // Pending download promises: url → { resolve, reject }.
-  // ponytail: resolved when the Electron session will-download handler completes (must be
-  // wired in main.ts).  waitTillMediaDownloadCompletes falls back to DB polling if absent.
-  const pending = new Map<string, { resolve: () => void; reject: (e: Error) => void }>();
+  const db = () => ctx.nativeDb();
 
   return {
     /** True iff a hash-verified cached blob exists for this hash+ext pair. */
     isCachedMediaFileExist: async (mediaFileHash: unknown, suggestedFileName: unknown) => {
       try {
         const hash = String(mediaFileHash);
-        const p = cachedPath(hash, fileExt(String(suggestedFileName)));
+        const p = cachedPath(db(), hash, fileExt(String(suggestedFileName)));
         return p != null && sha256File(p) === hash;
       } catch { return false; }
     },
@@ -97,7 +51,7 @@ function mediaFilesBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
     tryOpenCachedMediaFileFile: async (mediaFileHash: unknown, suggestedFileName: unknown) => {
       try {
         const hash = String(mediaFileHash);
-        const p = cachedPath(hash, fileExt(String(suggestedFileName)));
+        const p = cachedPath(db(), hash, fileExt(String(suggestedFileName)));
         if (!p || sha256File(p) !== hash) return false;
         await shell.openPath(p);
         return true;
@@ -105,105 +59,62 @@ function mediaFilesBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
     },
 
     /**
-     * Register an expected download so the session will-download handler can route it.
-     * Emits 'media:prepareDownload' → main.ts must intercept the download, write the file
-     * to destDir, upsert media_cache, then resolve the pending promise.
-     * ponytail: without session.on('will-download') wiring, falls back to DB polling below.
+     * Pre-arm the save. The actual write happens in the session 'will-download'
+     * router (installed by the registry), which lands the decrypted blob in
+     * ~/Downloads/WhatsApp and records it in media_cache. No fetch — the bytes ride
+     * the DownloadItem. The URL here is the bundle's blob: URL (doc 40 §3.2).
      */
-    prepareForMediaFileSaving: async (
-      url: unknown, suggestedFileName: unknown, mediaFileHash: unknown,
-    ) => {
-      const u = String(url);
-      const destDir = path.join(transfersRoot, weekBucket());
-      ensureDir(destDir);
-      if (!pending.has(u)) {
-        let res!: () => void;
-        let rej!: (e: Error) => void;
-        const p = new Promise<void>((resolve, reject) => { res = resolve; rej = reject; });
-        pending.set(u, { resolve: res, reject: rej });
-        void p; // keep alive until resolved
-      }
-      ctx.emit('media:prepareDownload', {
-        url: u,
-        suggestedFileName: String(suggestedFileName),
-        mediaFileHash: String(mediaFileHash),
-        destDir,
-      });
+    prepareForMediaFileSaving: async (url: unknown, suggestedFileName: unknown, mediaFileHash: unknown) => {
+      expectDownload(String(url), String(suggestedFileName), String(mediaFileHash));
     },
 
-    /**
-     * Await download completion by polling media_cache (500 ms ticks, 30 s deadline).
-     * ponytail: for immediate resolution, wire main.ts to resolve pending[url] after the
-     * will-download handler completes and upserts the cache row.
-     */
-    waitTillMediaDownloadCompletes: async (
-      url: unknown, suggestedFileName: unknown, mediaFileHash: unknown,
-    ) => {
-      const hash = String(mediaFileHash);
-      const ext  = fileExt(String(suggestedFileName));
-      const deadline = Date.now() + 30_000;
-      while (Date.now() < deadline) {
-        if (cachedPath(hash, ext)) return;
-        await new Promise<void>((r) => setTimeout(r, 500));
-      }
-      ctx.log('MediaFilesBridge.waitTillMediaDownloadCompletes: timed out for', String(url));
+    /** Resolves once the router records the file (30s fallback inside awaitDownload). */
+    waitTillMediaDownloadCompletes: async (_url: unknown, _suggestedFileName: unknown, mediaFileHash: unknown) => {
+      await awaitDownload(String(mediaFileHash));
     },
 
-    /** Show a native folder picker for bulk media saving.  Returns the chosen path or "". */
+    /** Native folder picker for bulk media saving; defaults to ~/Downloads/WhatsApp. */
     selectFolderForBulkMediaSaving: async () => {
       try {
-        const win = BrowserWindow.getFocusedWindow()
-          ?? BrowserWindow.getAllWindows()[0]
-          ?? null;
-        if (!win) return '';
-        const res = await dialog.showOpenDialog(win, {
-          properties: ['openDirectory', 'createDirectory'],
+        const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
+        const opts = {
+          properties: ['openDirectory', 'createDirectory'] as const,
+          defaultPath: downloadsDir(),
           title: 'Select folder for saving media',
-        });
+        };
+        const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
         return res.canceled ? '' : (res.filePaths[0] ?? '');
       } catch { return ''; }
     },
 
     /**
-     * Register a zip download + unarchive to targetFolder.
-     * ponytail: unzip (adm-zip/yauzl) + session will-download wiring required in main.ts.
+     * Pre-arm a zip download — it lands in ~/Downloads/WhatsApp via the router.
+     * ponytail: auto-unarchive needs an unzip dep; the .zip itself still saves.
      */
     prepareForZipArchiveSavingAndUnarchiveToFolder: async (
-      url: unknown, targetFolder: unknown, _archiveName: unknown, mediaFileHash: unknown,
+      url: unknown, _targetFolder: unknown, archiveName: unknown, mediaFileHash: unknown,
     ) => {
-      ctx.emit('media:prepareZipDownload', {
-        url: String(url),
-        targetFolder: String(targetFolder),
-        mediaFileHash: String(mediaFileHash),
-      });
+      expectDownload(String(url), String(archiveName ?? 'archive.zip'), String(mediaFileHash));
     },
 
     /**
-     * Post the transfers directory to the renderer.
-     * ponytail: WebView2 PostWebMessageWithDirectory provides a FileSystemDirectoryHandle object;
-     * Electron emits the path string instead — renderer-side JS must adapt.
+     * Electron has no FileSystemDirectoryHandle to hand back; returning nothing makes
+     * the bundle fall back to the blob-download path, which the router handles. ponytail.
      */
-    requestFileSystemDirectoryHandle: async (directoryType: unknown) => {
-      const dir = path.join(transfersRoot, weekBucket());
-      ensureDir(dir);
-      ctx.emit('media:directoryHandle', { directoryType: String(directoryType), path: dir });
-    },
+    requestFileSystemDirectoryHandle: async () => undefined,
 
     /** Copy a single cached file to the clipboard. */
     tryCopyCachedMediaFile: async (mediaFileHash: unknown) => {
       try {
-        const hash = String(mediaFileHash);
-        const rows = cacheDb()
+        const rows = ensureCacheTable(db())
           .prepare('SELECT path, ext FROM media_cache WHERE hash=?')
-          .all(hash) as { path: string; ext: string }[];
+          .all(String(mediaFileHash)) as { path: string; ext: string }[];
         const row = rows.find((r) => fs.existsSync(r.path));
         if (!row) return false;
-        const imgExts = new Set(['jpg', 'jpeg', 'png', 'bmp', 'gif']);
-        if (imgExts.has(row.ext)) {
+        if (new Set(['jpg', 'jpeg', 'png', 'bmp', 'gif']).has(row.ext)) {
           clipboard.writeImage(nativeImage.createFromPath(row.path));
         } else {
-          // ponytail: no native file-list clipboard on Linux; writes the path as plain text.
-          clipboard.writeText(row.path);
+          clipboard.writeText(row.path); // ponytail: no native file clipboard on Linux
         }
         return true;
       } catch { return false; }
@@ -215,18 +126,13 @@ function mediaFilesBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
      */
     tryCopyCachedMediaFiles: async (mediaFilesHash: unknown) => {
       try {
-        const hashes: string[] = Array.isArray(mediaFilesHash)
-          ? (mediaFilesHash as unknown[]).map(String)
-          : [String(mediaFilesHash)];
+        const hashes = Array.isArray(mediaFilesHash) ? (mediaFilesHash as unknown[]).map(String) : [String(mediaFilesHash)];
         for (const hash of hashes) {
-          const rows = cacheDb()
-            .prepare('SELECT path, ext FROM media_cache WHERE hash=?')
-            .all(hash) as { path: string; ext: string }[];
+          const rows = ensureCacheTable(db())
+            .prepare('SELECT path FROM media_cache WHERE hash=?')
+            .all(hash) as { path: string }[];
           const row = rows.find((r) => fs.existsSync(r.path));
-          if (!row) continue;
-          // ponytail: writing path as text (no multi-file clipboard on Linux).
-          clipboard.writeText(row.path);
-          return true;
+          if (row) { clipboard.writeText(row.path); return true; }
         }
         return false;
       } catch { return false; }

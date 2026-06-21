@@ -10,9 +10,10 @@
 // (Record<jsName, factory>). They are auto-collected via Vite glob so parallel
 // authors never touch a shared registry file.
 
-import { ipcMain, WebContents } from 'electron';
+import { ipcMain, session, WebContents } from 'electron';
 import type { BridgeContext, BridgeFactory, BridgeMethods } from './types';
 import { buildContext } from './services';
+import { installDownloadRouting } from './mediaDownloads';
 
 const NOT_FOUND = { __wa_err__: true, notFound: true } as const;
 
@@ -23,6 +24,10 @@ export function installBridges(): void {
   installed = true;
 
   const ctx: BridgeContext = buildContext();
+
+  // Route WA Web media downloads silently to ~/Downloads/WhatsApp (the Windows
+  // MediaDownloadManager analog) and record them in the private media_cache.
+  installDownloadRouting(session.defaultSession, () => ctx.nativeDb());
 
   // Collect every impl/*.ts module. eager so it's resolved at build time.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
