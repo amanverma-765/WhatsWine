@@ -227,7 +227,8 @@ function runHybridSmoke(wc: Electron.WebContents) {
           const ho = window.chrome && window.chrome.webview && window.chrome.webview.hostObjects;
           if (!ho) return { ok:false, why:'no hostObjects' };
           const sql = ho.SQLiteBridge;
-          await sql.executeSqliteAsync([['CREATE TABLE IF NOT EXISTS t(x)']]);
+          await sql.executeSqliteAsync([['DROP TABLE IF EXISTS t']]);
+          await sql.executeSqliteAsync([['CREATE TABLE t(x)']]);
           await sql.executeSqliteAsync([['INSERT INTO t(x) VALUES (?)', 42]]);
           const r = await sql.executeSqliteAsync([['SELECT x FROM t']]);
           const syncProbe = window.chrome.webview.hostObjects.sync.DebugFeaturesBridge.isDebugBuild();
