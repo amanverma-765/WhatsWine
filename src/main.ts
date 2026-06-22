@@ -20,11 +20,11 @@ const WA_ORIGIN = 'https://web.whatsapp.com/';
 
 // The bundle reads `windowsBuild` as `quaternary: Number(windowsBuild)` of the
 // ClientPayload UserAgent.appVersion (UINT32) — so it MUST be a single integer,
-// NOT a dotted version. Number('2.2607.106.0')===NaN throws "must be an int" and
+// NOT a dotted version. Number('2.2623.103.0')===NaN throws "must be an int" and
 // the login socket closes 1006 (QR never loads). The web app's primary/secondary/
 // tertiary come from the served bundle; quaternary is just the Windows build tag.
 // ponytail: bump WINDOWS_BUILD if WA ever server-gates an old hybrid build.
-const WINDOWS_BUILD = '2607106';          // -> appVersion.quaternary (uint32)
+const WINDOWS_BUILD = '2623103';          // -> appVersion.quaternary (uint32); WhatsApp Windows 2.2623.103.0
 const HYBRID_BUILD_TYPE = 'Production';
 const OS_BUILD = '22631';
 // A real WebView2/Edge version string for the request header (not parsed as int).
