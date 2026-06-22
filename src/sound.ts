@@ -1,12 +1,12 @@
 import { BrowserWindow, type WebContents } from "electron";
 
-// WhatsApp Windows notification tone (whatsapp_windows_pn_02.m4a, AAC), vendored
-// from decompiled_source/x64/Sounds. The Windows client plays notification tones
+// WhatsApp Windows notification tone (assets/sounds/whatsapp_windows_pn_02.m4a,
+// AAC), kept as the source for the base64 below. The Windows client plays tones
 // natively via SystemIntegrations.PlayTone(toneId) (CustomTones.cs): toneId 1 is
-// THIS file (the default), 2..11 are Alert-01..10.wma. Chromium cannot decode WMA,
-// so the alert variants are vendored but not wired; every non-silent tone falls
-// back to this one. VoIP ring/hangup are played by the WA Web bundle own WebRTC
-// stack (see voip.ts scope boundary), so they are not wired here.
+// THIS file (the default), 2..11 were Alert-01..10.wma. Chromium cannot decode
+// WMA, so every non-silent tone just falls back to this one — the alert variants,
+// VoIP ringtone, and hangup wav were dead weight and have been removed (the WA Web
+// bundle's own WebRTC stack rings for calls; see voip.ts scope boundary).
 //
 // Bridge methods run in the MAIN process, which has no <audio>. So we play inside
 // the WA page, which already has a working, CSP-permissive audio stack (it uses
