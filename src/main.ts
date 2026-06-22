@@ -1,8 +1,9 @@
-import { app, BrowserWindow, session, shell, Tray, Menu, nativeImage } from 'electron';
+import { app, BrowserWindow, session, shell, Tray, Menu } from 'electron';
 import path from 'node:path';
 import { writeFileSync } from 'node:fs';
 import started from 'electron-squirrel-startup';
-import { TRAY_ICON_DATA_URL } from './trayIcon';
+import { appIcon } from './icon';
+import { installSoundPlayer } from './sound';
 import { installBridges } from './bridge/registry';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
@@ -75,7 +76,7 @@ function updateUnread(title: string) {
 }
 
 function createTray() {
-  tray = new Tray(nativeImage.createFromDataURL(TRAY_ICON_DATA_URL));
+  tray = new Tray(appIcon());
   tray.setToolTip('WhatsApp');
   tray.setContextMenu(
     Menu.buildFromTemplate([
@@ -121,6 +122,7 @@ const createWindow = () => {
     minWidth: 800,
     minHeight: 600,
     autoHideMenuBar: true,
+    icon: appIcon(),
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       // Remote content: keep it walled off from Node/Electron internals. The bridge
@@ -194,6 +196,11 @@ const createWindow = () => {
   wc.on('will-redirect', reassertParams);
 
   wc.on('page-title-updated', (_e, title) => updateUnread(title));
+
+  // Inject the WhatsApp notification-tone player into the WA page on every load
+  // (idempotent self-guard). The native SystemIntegrations.playTone bridge triggers
+  // it from the main process (src/sound.ts).
+  wc.on('dom-ready', () => installSoundPlayer(wc));
 
   // Close button hides to tray instead of quitting (real quit via tray / before-quit).
   mainWindow.on('close', (e) => {

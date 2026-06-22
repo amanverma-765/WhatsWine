@@ -10,13 +10,16 @@ import { FuseV1Options, FuseVersion } from '@electron/fuses';
 const config: ForgeConfig = {
   packagerConfig: {
     asar: true,
+    // Real WhatsApp app icon (vendored from the Windows/macOS clients into assets/).
+    // Packager appends the per-platform extension: .ico (win), .icns (mac).
+    icon: 'assets/icon',
   },
   rebuildConfig: {},
   makers: [
     new MakerSquirrel({}),
     new MakerZIP({}, ['darwin']),
-    new MakerRpm({}),
-    new MakerDeb({}),
+    new MakerRpm({ options: { icon: 'assets/icon.png' } }),
+    new MakerDeb({ options: { icon: 'assets/icon.png' } }),
   ],
   plugins: [
     new VitePlugin({

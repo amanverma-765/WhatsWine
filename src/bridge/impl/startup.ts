@@ -6,6 +6,8 @@
 import { app, Notification } from 'electron';
 import type { BridgeFactory, BridgeContext } from '../types';
 import { toWeb } from '../eventtarget';
+import { appIcon } from '../../icon';
+import { playTone as playToneSound, playWaTone } from '../../sound';
 
 const LAUNCH_TS = Date.now();
 
@@ -75,10 +77,13 @@ function systemIntegrationsBridge(): ReturnType<BridgeFactory> {
       _replyPlaceholder: string, _replyButton: string, suppressToast: boolean,
     ) => {
       if (suppressToast || !Notification.isSupported()) return;
-      const n = new Notification({ title: header || 'WhatsApp', body: body || '', icon: thumbnailPath || undefined });
+      // Branded WA icon when the message has no avatar; toast is silent because we
+      // play the real WhatsApp tone ourselves (sound.ts) — matches the native client.
+      const n = new Notification({ title: header || 'WhatsApp', body: body || '', icon: thumbnailPath || appIcon(), silent: true });
       // ponytail: reply/context actions need libnotify action wiring — basic toast now.
       n.on('click', () => tw.call('messageNotificationAction', { tag: tag || key, action: 'open', additionalData: '' }));
       n.show();
+      playWaTone();
       open.set(`${key}|${tag}`, n);
     },
     closeMessageNotification: (key: string, tag: string) => {
@@ -91,7 +96,7 @@ function systemIntegrationsBridge(): ReturnType<BridgeFactory> {
     getStartupTaskState: async () => (app.getLoginItemSettings().openAtLogin ? 'enabled' : 'disabled'),
     updateStartupTask: (enabled: unknown) => app.setLoginItemSettings({ openAtLogin: !!enabled }),
     updateCurrentWebAppScreen: () => undefined,   // jumplist hint — no-op on Linux
-    playTone: () => undefined,
+    playTone: (toneId: unknown) => playToneSound(Number(toneId)),
   };
 }
 
