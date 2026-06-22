@@ -38,12 +38,9 @@ const config: ForgeConfig = {
           target: 'preload',
         },
       ],
-      renderer: [
-        {
-          name: 'main_window',
-          config: 'vite.renderer.config.ts',
-        },
-      ],
+      // No local renderer: the window loads the remote WhatsApp Web bundle
+      // (src/main.ts -> loadURL), so there is no app-owned HTML/renderer to build.
+      renderer: [],
     }),
     // Fuses are used to enable/disable various Electron functionality
     // at package time, before code signing the application
