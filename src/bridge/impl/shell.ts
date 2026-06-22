@@ -4,55 +4,32 @@
 // Doc refs: bridge-catalog §AppActivation–LinksPreview, docs/30 §3.5, docs/31 §3.16.
 
 import { shell, app } from 'electron';
+import path from 'node:path';
+import dns from 'node:dns/promises';
+import net from 'node:net';
 import type { BridgeFactory, BridgeContext } from '../types';
 import { toWeb } from '../eventtarget';
 
 const APP_VERSION = app.getVersion();
 const UA_HEADER = `WhatsApp/${APP_VERSION} W`;
-const HEAD_CAP = 102_400;      // max chars of HTML to read (catalog §LinksPreviewBridge)
-const FETCH_TIMEOUT_MS = 5_000; // 5 s budget per catalog
+const HEAD_CAP = 102_400;        // max chars of HTML to read (catalog §LinksPreviewBridge)
+const FETCH_TIMEOUT_MS = 5_000;  // 5 s budget per catalog
+const MAX_REDIRECTS = 3;
+const MAX_IMAGE_BYTES = 2 * 1024 * 1024; // cap preview-image fetch to avoid memory-exhaustion DoS
 
 // ============================================================================
 // AppActivationBridge  (catalog §AppActivationBridge, doc 30 §3.5)
-// ToNative : subscribe(web) — Sync; replays buffered deeplinks on first call.
+// ToNative : subscribe(web) — Sync.
 // ToWeb    : handleAppActivationViaProtocol(url: string)
 // ============================================================================
 
-// Module-level buffer so main.ts 'open-url'/'second-instance' handlers can push
-// whatsapp:// deeplinks before the bundle has subscribed to this bridge.
-const _deeplinkBuffer: string[] = [];
-
 function appActivationBridge(): ReturnType<BridgeFactory> {
+  // The bundle subscribes for whatsapp:// deeplink delivery.
+  // ponytail: no deeplink source is wired (no setAsDefaultProtocolClient / 'open-url'
+  // handler in main.ts), so this only needs to accept the subscription. To add
+  // deeplinks later, call tw.call('handleAppActivationViaProtocol', url) from main.ts.
   const tw = toWeb();
-  let flushed = false;
-
-  return {
-    subscribe(web?: unknown) {
-      tw.subscribe(web);
-      if (!flushed) {
-        flushed = true;
-        // Replay any deeplinks buffered before the bundle subscribed.
-        for (const url of _deeplinkBuffer.splice(0)) {
-          tw.call('handleAppActivationViaProtocol', url);
-        }
-      }
-    },
-
-    /**
-     * Electron-only hook — not part of the Windows API surface.
-     * main.ts calls bridge.__pushDeeplink(url) from the 'open-url' /
-     * 'second-instance' handlers when a whatsapp:// activation arrives.
-     */
-    __pushDeeplink(url: unknown) {
-      const link = String(url ?? '').trim();
-      if (!link) return;
-      if (flushed) {
-        tw.call('handleAppActivationViaProtocol', link);
-      } else {
-        _deeplinkBuffer.push(link);
-      }
-    },
-  };
+  return { subscribe: tw.subscribe };
 }
 
 // ============================================================================
@@ -71,8 +48,11 @@ function sharesheetBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
      *           userDataDir/media/<mediaFileHash> before this is called.
      */
     async shareFile(mediaFileHash: unknown, suggestedFileName: unknown): Promise<void> {
-      // ponytail: openPath instead of OS sharesheet
-      const filePath = `${ctx.userDataDir}/media/${String(mediaFileHash ?? '')}`;
+      // path.basename strips any ../ or absolute path the (untrusted) page supplies,
+      // and the containment check keeps the open inside userDataDir/media.
+      const mediaDir = path.join(ctx.userDataDir, 'media');
+      const filePath = path.join(mediaDir, path.basename(String(mediaFileHash ?? '')));
+      if (!filePath.startsWith(mediaDir + path.sep)) return;
       const err = await shell.openPath(filePath);
       if (err) {
         ctx.log('SharesheetBridge.shareFile: openPath failed for', suggestedFileName, '—', err);
@@ -83,38 +63,25 @@ function sharesheetBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
 
 // ============================================================================
 // ScalingControlBridge  (catalog §ScalingControlBridge)
-// ToNative : showScalingControl(zoomFactor) — Sync
-//          : subscribe(web) — Sync
+// ToNative : showScalingControl(zoomFactor) — Sync · subscribe(web) — Sync
 // ToWeb    : zoomIn() · zoomOut()
 // ============================================================================
 
 function scalingControlBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
   const tw = toWeb();
-  let currentZoom = 1.0;
-
   return {
     subscribe: tw.subscribe,
-
     showScalingControl(zoomFactor: unknown) {
-      // ponytail: Windows shows a native DPI scaling flyout — no direct Linux equivalent.
-      // Store the factor the bundle reports so __getCurrentZoom() stays coherent.
-      const z = Number(zoomFactor);
-      if (Number.isFinite(z) && z > 0) currentZoom = z;
-      ctx.log('ScalingControlBridge.showScalingControl zoomFactor=', currentZoom);
+      // ponytail: Windows shows a native DPI scaling flyout — no Linux equivalent; just log.
+      ctx.log('ScalingControlBridge.showScalingControl zoomFactor=', Number(zoomFactor));
     },
-
-    // Hooks for main.ts accelerator bindings (Ctrl+= / Ctrl+- / Ctrl+0).
-    // Wire: bridge.__zoomIn() / bridge.__zoomOut() from globalShortcut or Menu.
-    __zoomIn()  { tw.call('zoomIn'); },
-    __zoomOut() { tw.call('zoomOut'); },
-    __getCurrentZoom() { return currentZoom; },
   };
 }
 
 // ============================================================================
 // RateAppBridge  (catalog §RateAppBridge)
-// ToNative : getStoreProductForCurrentAppAsync() — Async (name + return)
-//          : requestRateAndReviewAppAsync()       — Async (name + return)
+// ToNative : getStoreProductForCurrentAppAsync() — Async
+//          : requestRateAndReviewAppAsync()       — Async
 // ToWeb    : none
 // ============================================================================
 
@@ -140,11 +107,11 @@ function rateAppBridge(): ReturnType<BridgeFactory> {
 
 // ============================================================================
 // LinksPreviewBridge  (catalog §LinksPreviewBridge, doc 31 §3.16)
-// ToNative : getPreviewAsync(link) — Async (name-suffix + IAsyncOperation<string>)
+// ToNative : getPreviewAsync(link) — Async (IAsyncOperation<string>)
 // ToWeb    : none
 // Returns  : JSON string {title, description, thumbnail?}
 //            | {title: host, description: link}  (HTML parse fail)
-//            | ""                                 (hard fetch error)
+//            | ""                                 (hard fetch error / blocked)
 // ============================================================================
 
 function linksPreviewBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
@@ -158,11 +125,8 @@ function linksPreviewBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
       const fallback = JSON.stringify({ title: hostname, description: url });
 
       try {
-        const res = await fetch(url, {
-          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-          headers: { 'User-Agent': UA_HEADER },
-        });
-        if (!res.ok) return '';
+        const res = await safeFetch(url, { 'User-Agent': UA_HEADER });
+        if (!res || !res.ok) return '';
 
         const ct = res.headers.get('content-type') ?? '';
         if (!ct.includes('text/html')) return fallback;
@@ -190,6 +154,67 @@ function linksPreviewBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
 // ---------------------------------------------------------------------------
 // Link-preview helpers (module-private)
 // ---------------------------------------------------------------------------
+
+/** True for loopback/private/link-local/metadata addresses we must never fetch. */
+function isBlockedIp(ip: string): boolean {
+  if (net.isIP(ip) === 0) return false;
+  return /^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip)
+    || ip === '::1' || /^f[cd]/i.test(ip) || /^fe80/i.test(ip);
+}
+
+/**
+ * SSRF-guarded fetch for preview content. The link/og:image come from arbitrary
+ * third parties via the page, so before each hop we resolve the host and refuse
+ * non-http(s) schemes and private/loopback/link-local/metadata targets. Redirects
+ * are followed manually (redirect:'manual') so a public host can't 302 into an
+ * internal address. Returns null when blocked, unresolvable, or over the hop limit.
+ */
+async function safeFetch(raw: string, headers: Record<string, string>): Promise<Response | null> {
+  let url = raw;
+  for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
+    let u: URL;
+    try { u = new URL(url); } catch { return null; }
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+    let addr: string;
+    try { addr = (await dns.lookup(u.hostname)).address; } catch { return null; }
+    if (isBlockedIp(addr)) return null;
+
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      headers,
+      redirect: 'manual',
+    });
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get('location');
+      if (!loc) return res;
+      try { url = new URL(loc, url).href; } catch { return null; }
+      continue;
+    }
+    return res;
+  }
+  return null; // too many redirects
+}
+
+/** Read a response body, aborting past `cap` bytes; null if it exceeds the cap. */
+async function readBytesCapped(res: Response, cap: number): Promise<Buffer | null> {
+  const reader = res.body?.getReader();
+  if (!reader) return null;
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.length;
+      if (total > cap) return null;
+      chunks.push(value);
+    }
+  } finally {
+    reader.cancel().catch(() => undefined);
+  }
+  return Buffer.concat(chunks);
+}
 
 /** Stream-read up to maxChars characters from a Fetch Response body. */
 async function readHead(res: Response, maxChars: number): Promise<string> {
@@ -267,18 +292,16 @@ function parseHeadMeta(
 }
 
 /**
- * Fetch an image URL and return its bytes as a base64 string, or null on failure.
+ * Fetch an image URL (SSRF-guarded, size-capped) and return its bytes as base64,
+ * or null on failure.
  * ponytail: no resize/crop — Windows resized to ≤168 px; we return the raw image.
  */
 async function fetchImageBase64(imageUrl: string, ctx: BridgeContext): Promise<string | null> {
   try {
-    const res = await fetch(imageUrl, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      headers: { 'User-Agent': UA_HEADER },
-    });
-    if (!res.ok) return null;
-    const ab = await res.arrayBuffer();
-    return Buffer.from(ab).toString('base64');
+    const res = await safeFetch(imageUrl, { 'User-Agent': UA_HEADER });
+    if (!res || !res.ok) return null;
+    const bytes = await readBytesCapped(res, MAX_IMAGE_BYTES);
+    return bytes ? bytes.toString('base64') : null;
   } catch (err) {
     ctx.log('LinksPreviewBridge: thumbnail fetch failed for', imageUrl, '—', err);
     return null;

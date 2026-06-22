@@ -18,6 +18,7 @@ if (started) {
 // src/bridge/). `windows=1` is load-bearing — without it the bundle stays in
 // plain web mode and never touches the bridges.
 const WA_ORIGIN = 'https://web.whatsapp.com/';
+const WA_HOST_ORIGIN = new URL(WA_ORIGIN).origin;   // 'https://web.whatsapp.com'
 
 // The bundle reads `windowsBuild` as `quaternary: Number(windowsBuild)` of the
 // ClientPayload UserAgent.appVersion (UINT32) — so it MUST be a single integer,
@@ -114,7 +115,9 @@ const createWindow = () => {
   // CRITICAL: WA Web rolls back a successful login if it can't make storage
   // persistent ("aquire-persistent-storage-denied"). The Windows client force-grants
   // it; mirror that so navigator.storage.persist() succeeds and the session sticks.
-  session.defaultSession.setPermissionCheckHandler(() => true);
+  // Gate the blanket grant to the WhatsApp origin only (was: every origin) — the
+  // shell only ever loads WA, and off-origin top-level navigation is blocked below.
+  session.defaultSession.setPermissionCheckHandler((_wc, _permission, origin) => origin === WA_HOST_ORIGIN);
 
   mainWindow = new BrowserWindow({
     width: 1200,
@@ -147,7 +150,9 @@ const createWindow = () => {
         setting: 'granted',
         origin: WA_ORIGIN,
       })
-      .catch((e) => console.error('[hybrid] persistent-storage grant failed:', e));
+      .catch((e) => console.error('[hybrid] persistent-storage grant failed:', e))
+      // One-shot grant — don't leave the CDP session attached for the window's life.
+      .finally(() => { try { wc.debugger.detach(); } catch { /* already detached */ } });
   } catch (e) {
     console.error('[hybrid] debugger attach failed:', e);
   }
@@ -186,7 +191,11 @@ const createWindow = () => {
   const reassertParams = (e: { url: string; preventDefault: () => void }) => {
     try {
       const u = new URL(e.url);
-      if (u.origin === new URL(WA_ORIGIN).origin && u.pathname === '/' && !u.searchParams.has('windows')) {
+      // Never let the top frame navigate off web.whatsapp.com — the permission grants
+      // are origin-gated to WA, so a foreign page here would be in-app phishing.
+      // External links already open in the OS browser via setWindowOpenHandler.
+      if (u.origin !== WA_HOST_ORIGIN) { e.preventDefault(); return; }
+      if (u.pathname === '/' && !u.searchParams.has('windows')) {
         e.preventDefault();
         wc.loadURL(buildUrl(), { userAgent });
       }
