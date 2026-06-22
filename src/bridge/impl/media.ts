@@ -77,8 +77,8 @@ function mediaFilesBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
     selectFolderForBulkMediaSaving: async () => {
       try {
         const win = BrowserWindow.getFocusedWindow() ?? BrowserWindow.getAllWindows()[0];
-        const opts = {
-          properties: ['openDirectory', 'createDirectory'] as const,
+        const opts: Electron.OpenDialogOptions = {
+          properties: ['openDirectory', 'createDirectory'],
           defaultPath: downloadsDir(),
           title: 'Select folder for saving media',
         };
@@ -208,6 +208,7 @@ function mediaTranscodingBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
       const src = bufs.get(Number(sourceBufferId));
       if (!src?.sourcePath) return false;
       if (!await hasFfmpeg()) return false;
+      const sourcePath = src.sourcePath;
       const sid = Number(sourceBufferId);
       const rid = Number(resultBufferId);
       const outPath = path.join(tmpDir, `frame_${rid}.jpg`);
@@ -217,7 +218,7 @@ function mediaTranscodingBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
         await new Promise<void>((resolve, reject) => {
           execFile(
             'ffmpeg',
-            ['-y', '-i', src.sourcePath!, '-vframes', '1', '-q:v', '2', outPath],
+            ['-y', '-i', sourcePath, '-vframes', '1', '-q:v', '2', outPath],
             { timeout: 30_000, signal: ac.signal },
             (err) => { if (err) reject(err); else resolve(); },
           );
@@ -243,6 +244,7 @@ function mediaTranscodingBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
       const src = bufs.get(Number(sourceBufferId));
       if (!src?.sourcePath) return false;
       if (!await hasFfmpeg()) return false;
+      const sourcePath = src.sourcePath;
       const sid = Number(sourceBufferId);
       const rid = Number(resultBufferId);
       const outPath = path.join(tmpDir, `transcode_${rid}.mp4`);
@@ -253,7 +255,7 @@ function mediaTranscodingBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
           execFile(
             'ffmpeg',
             [
-              '-y', '-i', src.sourcePath!,
+              '-y', '-i', sourcePath,
               // Fit within 960×960 box, maintaining aspect ratio.
               // Mirrors AddMaxEdgeTransform(960) (doc 40 §3.1.4).
               '-vf', 'scale=960:960:force_original_aspect_ratio=decrease:flags=lanczos',
