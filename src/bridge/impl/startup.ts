@@ -78,7 +78,7 @@ function systemIntegrationsBridge(): ReturnType<BridgeFactory> {
       if (suppressToast || !Notification.isSupported()) return;
       // Branded WA icon when the message has no avatar; toast is silent because we
       // play the real WhatsApp tone ourselves (sound.ts) — matches the native client.
-      const n = new Notification({ title: header || 'WhatsApp', body: body || '', icon: thumbnailPath || appIcon(), silent: true });
+      const n = new Notification({ title: header || 'WhatsApp', body: body || 'New message', icon: thumbnailPath || appIcon(), silent: true });
       // ponytail: reply/context actions need libnotify action wiring — basic toast now.
       n.on('click', () => tw.call('messageNotificationAction', { tag: tag || key, action: 'open', additionalData: '' }));
       n.show();

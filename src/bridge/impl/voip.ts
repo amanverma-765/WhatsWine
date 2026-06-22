@@ -21,8 +21,74 @@
 // called.  Real call functionality requires the proprietary IVoip engine.
 // ─────────────────────────────────────────────────────────────────────────────
 
+import { Notification } from 'electron';
 import type { BridgeFactory, BridgeContext } from '../types';
 import { toWeb } from '../eventtarget';
+import { appIcon } from '../../icon';
+
+// ─── Incoming-call notification ──────────────────────────────────────────────
+// Desktop can't take the call (no IVoip engine), so the one useful thing we can
+// do with an inbound offer is tell the user to answer on their phone.
+// One toast per caller per ringing window — the offer re-fires per device / re-offer.
+// ponytail: 35s window keyed by peerJid, plain timestamp; good enough for call toasts.
+const lastCallToast = new Map<string, number>();
+const CALL_TOAST_WINDOW_MS = 35_000;
+
+// peerJid -> human label. Best-effort name from the contacts ledger (data.ts table),
+// else a formatted number, else generic. @lid jids usually won't resolve — that's fine.
+function callerLabel(ctx: BridgeContext, peerJid: string): string {
+  try {
+    const row = ctx.nativeDb()
+      .prepare('SELECT json FROM contacts WHERE jid = ?')
+      .get(peerJid) as { json: string } | undefined;
+    if (row) {
+      const c = JSON.parse(row.json);
+      const name = c.name || c.shortName || c.pushname || c.pushName || c.notify || '';
+      if (name) return name;
+    }
+  } catch { /* table may not exist yet / lid jid / malformed — fall through */ }
+  // Only a phone-domain jid carries a real number; @lid is an opaque id, not a +number.
+  const domain = String(peerJid).split('@')[1] ?? '';
+  const local = String(peerJid).split('@')[0].split(':')[0];
+  if (/^(s\.whatsapp\.net|c\.us)$/.test(domain) && /^\d+$/.test(local)) return `+${local}`;
+  return 'Someone';
+}
+
+function showIncomingCallToast(ctx: BridgeContext, peerJid: string): void {
+  if (!Notification.isSupported() || !peerJid) return;
+  const now = Date.now();
+  if (now - (lastCallToast.get(peerJid) ?? 0) < CALL_TOAST_WINDOW_MS) return;
+  lastCallToast.set(peerJid, now);
+  const who = callerLabel(ctx, peerJid);
+  new Notification({
+    title: 'Incoming WhatsApp call',
+    body: `${who} is calling. Answer this call on your phone — calls aren't supported on WhatsApp Desktop yet.`,
+    icon: appIcon(),
+    silent: true,   // the bundle's in-app call UI already rings via its WebRTC stack
+  }).show();
+}
+
+// ponytail self-check (WA_VOIP_SELFCHECK=1): jid parse + dedup, no framework.
+if (process.env.WA_VOIP_SELFCHECK) {
+  const fmt = (jid: string) => {
+    const domain = jid.split('@')[1] ?? '';
+    const local = jid.split('@')[0].split(':')[0];
+    return /^(s\.whatsapp\.net|c\.us)$/.test(domain) && /^\d+$/.test(local) ? `+${local}` : 'Someone';
+  };
+  console.assert(fmt('15551234567@s.whatsapp.net') === '+15551234567', 'pn jid -> +number');
+  console.assert(fmt('15551234567:3@s.whatsapp.net') === '+15551234567', 'device jid -> +number');
+  console.assert(fmt('99@lid') === 'Someone', 'lid jid -> Someone (opaque id, not a number)');
+  const seen = new Map<string, number>();
+  const t = 1_000_000;
+  const dup = (j: string, now: number) => {
+    if (now - (seen.get(j) ?? 0) < CALL_TOAST_WINDOW_MS) return false;
+    seen.set(j, now); return true;
+  };
+  console.assert(dup('a@x', t) === true, 'first fires');
+  console.assert(dup('a@x', t + 1_000) === false, 'repeat within window suppressed');
+  console.assert(dup('a@x', t + CALL_TOAST_WINDOW_MS + 1) === true, 'fires again after window');
+  console.log('[voip self-check] ok');
+}
 
 // Both VoipBridge and VoipSignalingBridge are backed by the same native object
 // (VoipWinRTWebBridge).  Mirror that with a module-level shared ToWeb bus so
@@ -203,6 +269,7 @@ function voipSignalingBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactor
       _isOfferNotContact: unknown, peerJid: unknown,
     ) => {
       ctx.log('[VoipSignalingBridge] handleIncomingSignalingOffer (stub)', { peerJid, msgPlatform, msgT });
+      showIncomingCallToast(ctx, String(peerJid ?? ''));
     },
 
     // HandleIncomingSignalingMessage — mid-call signaling (rekey, update, etc.).
