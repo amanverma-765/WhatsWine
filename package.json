@@ -10,6 +10,7 @@
     "dev": "ELECTRON_DISABLE_SANDBOX=1 electron-forge start",
     "package": "electron-forge package",
     "make": "electron-forge make",
+    "make:linux": "rm -rf out && electron-forge make --platform=linux --arch=x64",
     "publish": "electron-forge publish",
     "lint": "eslint --ext .ts,.tsx ."
   },
