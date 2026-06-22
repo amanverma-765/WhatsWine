@@ -10,21 +10,20 @@ import type DatabaseT from 'better-sqlite3';
 // `defaultSyncProxy=true`). A method arg that is a function is a native→JS
 // callback (the `*BridgeToWeb` / `Subscribe` surface) — the registry revives it
 // into a real function that posts back to the renderer.
+// `any` is honest here: bridge methods are dynamically dispatched (arbitrary args
+// in, arbitrary value out) and validated at the IPC boundary, not by this type.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 export type BridgeMethods = Record<string, (...args: any[]) => any>;
 
 export interface BridgeContext {
   /** Electron userData dir (the WebView2 LocalCacheFolder analogue, doc 30 §5). */
   userDataDir: string;
-  /** Per-account dir: userData/sessions/{sha1(clientKey)}/ (doc 32 §5). */
-  sessionsDir: string;
   /** Lazily-opened native-owned sqlite (contacts/wam/prefs/abprops…), WAL+FULL+secure_delete. */
   nativeDb: () => DatabaseT.Database;
   /** safeStorage-backed KV for the login-secret material (ClientKey, salts; doc 32 §5). */
   secretSet: (key: string, value: string) => void;
   secretGet: (key: string) => string | null;
   secretDel: (key: string) => void;
-  /** Push an event to the renderer's main world (rare — most callbacks ride method fn-args). */
-  emit: (event: string, ...payload: unknown[]) => void;
   log: (...a: unknown[]) => void;
 }
 

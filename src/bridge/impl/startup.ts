@@ -25,7 +25,7 @@ function connectionBridge(): ReturnType<BridgeFactory> {
 
 // NativeAppStateBridge (doc 30 §3.11): "normal"/"minimizedToTray" state, launch/
 // restore timestamps, clock-skew. ToWeb: appStateChanged(appState).
-function nativeAppStateBridge(): ReturnType<BridgeFactory> & { __pushState?: (s: string) => void } {
+function nativeAppStateBridge(): ReturnType<BridgeFactory> {
   const tw = toWeb();
   return {
     subscribe: tw.subscribe,
@@ -35,8 +35,6 @@ function nativeAppStateBridge(): ReturnType<BridgeFactory> & { __pushState?: (s:
     getFirstAppRestoreTimeStamp: () => LAUNCH_TS,
     getLastAppRestoreTimeStamp: () => LAUNCH_TS,
     detectNativeClockSkew: (webTs: unknown) => Date.now() - Number(webTs ?? Date.now()),
-    // main.ts can push tray transitions: bridge.__pushState('minimizedToTray')
-    __pushState: (s: string) => tw.call('appStateChanged', s),
   };
 }
 
@@ -59,7 +57,8 @@ function preferencesBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
     },
     getLocalSetting: (key: string) => {
       const row = db().prepare('SELECT v FROM prefs WHERE k=?').get(String(key)) as { v: string } | undefined;
-      return row ? JSON.parse(row.v) : null;
+      if (!row) return null;
+      try { return JSON.parse(row.v); } catch { return null; }   // corrupt value reads as absent, not a bridge error
     },
   };
 }

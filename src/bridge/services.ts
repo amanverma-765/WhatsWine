@@ -9,7 +9,6 @@
 import { app, safeStorage } from 'electron';
 import path from 'node:path';
 import fs from 'node:fs';
-import crypto from 'node:crypto';
 import type DatabaseT from 'better-sqlite3';
 import type { BridgeContext } from './types';
 
@@ -23,10 +22,6 @@ function writeJson(file: string, obj: unknown) {
 
 export function buildContext(): BridgeContext {
   const userDataDir = app.getPath('userData');
-  // Session dir is keyed once a ClientKey exists; default to a shared dir until then.
-  const sessionsDir = path.join(userDataDir, 'sessions');
-  fs.mkdirSync(sessionsDir, { recursive: true });
-
   const secretsFile = path.join(userDataDir, 'secrets.json');
   const canEncrypt = (() => {
     try { return safeStorage.isEncryptionAvailable(); } catch { return false; }
@@ -42,11 +37,9 @@ export function buildContext(): BridgeContext {
   };
 
   let db: DatabaseT.Database | null = null;
-  const listeners = new Map<string, Set<(...a: unknown[]) => void>>();
 
   return {
     userDataDir,
-    sessionsDir,
     nativeDb() {
       if (!db) {
         // require (not import) so a missing/ABI-mismatched native addon only fails
@@ -76,23 +69,6 @@ export function buildContext(): BridgeContext {
       delete all[key];
       writeJson(secretsFile, all);
     },
-    emit(event, ...payload) {
-      const set = listeners.get(event);
-      if (set) for (const cb of set) cb(...payload);
-    },
     log: (...a) => console.log('[bridge]', ...a),
   };
-}
-
-// Stable per-install id substituting the Windows `SystemIdForPublisher` salt
-// (doc 32 §5): /etc/machine-id mixed with an app constant, else a random id.
-export function installSalt(userDataDir: string): Buffer {
-  let machineId = '';
-  try { machineId = fs.readFileSync('/etc/machine-id', 'utf8').trim(); } catch { /* not linux */ }
-  if (!machineId) {
-    const f = path.join(userDataDir, '.install-id');
-    try { machineId = fs.readFileSync(f, 'utf8').trim(); }
-    catch { machineId = crypto.randomBytes(16).toString('hex'); fs.writeFileSync(f, machineId, { mode: 0o600 }); }
-  }
-  return crypto.createHash('sha256').update('whatsapp-desktop:' + machineId).digest();
 }
