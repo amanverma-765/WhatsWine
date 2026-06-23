@@ -42,6 +42,15 @@ contextBridge.executeInMainWorld({
   func: (p: typeof prim) => {
     const ASYNC = /(Async|AsyncWithSpeller)$/;
 
+    // The bundle's logger renders Error objects as "[object Object]" in console output, hiding the
+    // cause of swallowed ErrorUtils failures (e.g. onCallEvent throwing on our synthesized event).
+    // Expand Error-like args so the real message/stack reaches the captured console.
+    const origErr = console.error.bind(console);
+    console.error = (...a: unknown[]) => origErr(...a.map((x) => {
+      const e = x as { stack?: string; message?: string } | null;
+      return (e && (e.stack || e.message)) ? `ERR(${e.message}) ${String(e.stack || '').slice(0, 400)}` : x;
+    }));
+
     // Main-world callback sinks: id -> fn (top-level callback) | object (subscribe web).
     const sinks = new Map<number, unknown>();
     let sinkId = 1;
@@ -90,12 +99,14 @@ contextBridge.executeInMainWorld({
       let m = bridgeListeners.get(name); if (!m) { m = new Map(); bridgeListeners.set(name, m); }
       let s = m.get(eventName); if (!s) { s = new Set(); m.set(eventName, s); }
       s.add(h);
+      console.log('[wabridge] addEventListener', name, eventName);
     };
     const removeBridgeListener = (name: string, eventName: string, h: (e: unknown) => void) =>
       bridgeListeners.get(name)?.get(eventName)?.delete(h);
     p.onBridgeEvent((name, eventName, payload) => {
       const s = bridgeListeners.get(name)?.get(eventName);
-      if (s) for (const h of [...s]) { try { h(payload); } catch { /* swallow renderer cb errors */ } }
+      console.log('[wabridge] event', name, eventName, 'listeners=' + (s ? s.size : 0));
+      if (s) for (const h of [...s]) { try { h(payload); } catch (e) { console.log('[wabridge] handler threw: ' + String((e as Error)?.stack || e).slice(0, 400)); } }
     });
 
     const makeBridge = (name: string, forceSync: boolean) =>
