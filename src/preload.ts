@@ -192,43 +192,34 @@ contextBridge.executeInMainWorld({
         try { fn(); console.log('[wabridge] setupVoipActiveCallChangeListener enabled (call popout)'); }
         catch (e) { console.log('[wabridge] setupVoipActiveCallChangeListener threw: ' + String(e)); }
       });
-      // Wrap getVoipStackInterface() so the windows stub gains the control methods the web call UI
-      // needs (`acceptCall`/`rejectCall` — the stub lacks them; native Windows accepts natively). They
-      // forward to our VoipBridge host object → engine. Also log other control-method calls to discover
-      // exactly what Accept/Decline invoke.
+      // Patch the windows stub IN PLACE (the singleton) so cached references see it too: inject the
+      // control methods the web call UI needs (`acceptCall`/`rejectCall` — the stub lacks them; native
+      // Windows accepts natively) forwarding to our VoipBridge host object → engine, and wrap every
+      // existing method to log which ones Accept/Decline actually invoke (discovery).
       rl(['WAWebVoipStackInterface'], (SI) => {
         const si = SI as Record<string, unknown> | null;
-        const orig = si?.getVoipStackInterface as ((...a: unknown[]) => unknown) | undefined;
-        if (!si || typeof orig !== 'function' || (orig as { __waWrapped?: boolean }).__waWrapped) return;
+        const getStack = si?.getVoipStackInterface as ((...a: unknown[]) => unknown) | undefined;
+        if (!si || typeof getStack !== 'function') return;
         const voip = () => (w.chrome?.webview?.hostObjects as Record<string, Record<string, (...a: unknown[]) => unknown>>).VoipBridge;
-        const CONTROL = /^(acceptCall|rejectCall|endCall|rejectCallWithoutCallContext|startCall|setCallMute|setCallVideoMute)$/;
-        let proxy: unknown = null;
-        const makeProxy = (stub: unknown) => {
-          if (!stub || typeof stub !== 'object') return stub;
-          if (proxy) return proxy;
-          proxy = new Proxy(stub as Record<string, unknown>, {
-            get(t, prop) {
-              const key = String(prop);
-              const v = (t as Record<string, unknown>)[key];
-              if ((key === 'acceptCall' || key === 'rejectCall') && typeof v !== 'function') {
-                return (...args: unknown[]) => { console.log('[wabridge] stub.' + key + ' (injected→bridge) args=' + args.length); return voip()[key](...args); };
-              }
-              if (typeof v === 'function' && CONTROL.test(key)) {
-                return (...args: unknown[]) => { console.log('[wabridge] stub.' + key + ' called args=' + args.length); return (v as (...a: unknown[]) => unknown).apply(t, args); };
-              }
-              return v;
-            },
-          });
-          return proxy;
+        const patch = (stub: unknown) => {
+          const s = stub as (Record<string, unknown> & { __waPatched?: boolean }) | null;
+          if (!s || typeof s !== 'object' || s.__waPatched) return;
+          s.__waPatched = true;
+          for (const m of ['acceptCall', 'rejectCall']) {
+            if (typeof s[m] !== 'function') s[m] = (...args: unknown[]) => { console.log('[wabridge] stub.' + m + ' (injected→bridge) args=' + args.length); return voip()[m](...args); };
+          }
+          for (const k of Object.keys(s)) {
+            const f = s[k] as ((...a: unknown[]) => unknown) & { __waW?: boolean };
+            if (typeof f === 'function' && !f.__waW) {
+              const wrapped = (...args: unknown[]) => { console.log('[wabridge] stub.' + k + ' args=' + args.length); return f.apply(s, args); };
+              (wrapped as { __waW?: boolean }).__waW = true;
+              s[k] = wrapped;
+            }
+          }
+          console.log('[wabridge] stub patched in place: ' + Object.keys(s).filter(k => typeof s[k] === 'function').length + ' methods');
         };
-        const wrapped = (...a: unknown[]) => {
-          const r = orig(...a);
-          if (r && typeof (r as { then?: unknown }).then === 'function') return (r as Promise<unknown>).then(makeProxy);
-          return makeProxy(r);
-        };
-        (wrapped as { __waWrapped?: boolean }).__waWrapped = true;
-        si.getVoipStackInterface = wrapped;
-        console.log('[wabridge] getVoipStackInterface wrapped (inject acceptCall/rejectCall + log control)');
+        try { const r = getStack(); if (r && typeof (r as { then?: unknown }).then === 'function') (r as Promise<unknown>).then(patch); else patch(r); }
+        catch (e) { console.log('[wabridge] getVoipStackInterface() threw: ' + String(e)); }
       });
     };
     hookHybridDispatch();
