@@ -25,37 +25,22 @@ import { Notification } from 'electron';
 import type { BridgeFactory, BridgeContext } from '../types';
 import { toWeb } from '../eventtarget';
 import { appIcon } from '../../icon';
-import { startRingtone, stopRingtone } from '../../ringtone';
 import { showMainWindow } from '../../window';
-import { showCallWindow } from '../../callWindow';
-
-// ─── Ringtone control ────────────────────────────────────────────────────────
-// The bundle's WebRTC stack stays silent here (engine stubbed), so we loop the
-// Windows ringtone ourselves while a call is offering. There's no reliable
-// "call ended" callback on the offer path, so the loop auto-stops on a timer
-// that re-arms on each re-fired offer; offers stop when the caller gives up or
-// the call is answered elsewhere, so the ring stops ~RING_REARM_MS later.
-// Local decline/hangup (endCall / reject / signOut) stops it immediately.
-// ponytail: timer-gated loop; caller-cancel tail is bounded by RING_REARM_MS.
-const RING_REARM_MS = 12_000;
-let ringStop: ReturnType<typeof setTimeout> | null = null;
-function ring(): void {
-  if (ringStop) clearTimeout(ringStop);
-  else startRingtone();
-  ringStop = setTimeout(stopRing, RING_REARM_MS);
-}
-function stopRing(): void {
-  if (ringStop) { clearTimeout(ringStop); ringStop = null; }
-  stopRingtone();
-}
+import { showCallLayer, placeCall } from '../../callView';
 
 // ─── Incoming-call notification ──────────────────────────────────────────────
-// Desktop can't take the call (no IVoip engine), so the one useful thing we can
-// do with an inbound offer is tell the user to answer on their phone.
 // One toast per caller per ringing window — the offer re-fires per device / re-offer.
 // ponytail: 35s window keyed by peerJid, plain timestamp; good enough for call toasts.
 const lastCallToast = new Map<string, number>();
 const CALL_TOAST_WINDOW_MS = 35_000;
+
+// Extract the bare phone number (digits, no '+') from a phone-domain jid, else null.
+// Only s.whatsapp.net / c.us jids carry a real number; @lid is an opaque id.
+function phoneFromJid(peerJid: string): string | null {
+  const domain = String(peerJid).split('@')[1] ?? '';
+  const local = String(peerJid).split('@')[0].split(':')[0];
+  return (/^(s\.whatsapp\.net|c\.us)$/.test(domain) && /^\d+$/.test(local)) ? local : null;
+}
 
 // peerJid -> human label. Best-effort name from the contacts ledger (data.ts table),
 // else a formatted number, else generic. @lid jids usually won't resolve — that's fine.
@@ -70,11 +55,8 @@ function callerLabel(ctx: BridgeContext, peerJid: string): string {
       if (name) return name;
     }
   } catch { /* table may not exist yet / lid jid / malformed — fall through */ }
-  // Only a phone-domain jid carries a real number; @lid is an opaque id, not a +number.
-  const domain = String(peerJid).split('@')[1] ?? '';
-  const local = String(peerJid).split('@')[0].split(':')[0];
-  if (/^(s\.whatsapp\.net|c\.us)$/.test(domain) && /^\d+$/.test(local)) return `+${local}`;
-  return 'Someone';
+  const num = phoneFromJid(peerJid);
+  return num ? `+${num}` : 'Someone';
 }
 
 function showIncomingCallToast(ctx: BridgeContext, peerJid: string): void {
@@ -85,15 +67,16 @@ function showIncomingCallToast(ctx: BridgeContext, peerJid: string): void {
   const who = callerLabel(ctx, peerJid);
   const n = new Notification({
     title: 'Incoming WhatsApp call',
-    body: `${who} is calling. Answer on your phone.`,
+    body: `${who} is calling. Answer here.`,
     icon: appIcon(),
-    silent: true,   // we loop the ringtone ourselves (see ring() above)
+    silent: true,   // the call layer rings natively; no OS notification sound on top
   });
-  n.on('click', () => showMainWindow());   // surface the bundle's in-app call screen
+  n.on('click', () => { showMainWindow(); showCallLayer(); });
   n.show();
-  // Also raise the call window (plain-web second device) so the user can answer
-  // directly there. No-op if the call window hasn't been paired yet.
-  showCallWindow();
+  // Raise the main window and flip up the call layer (plain-web second device) so the
+  // user can answer right here. No-op if the call layer isn't created yet.
+  showMainWindow();
+  showCallLayer();
 }
 
 // ponytail self-check (WA_VOIP_SELFCHECK=1): jid parse + dedup, no framework.
@@ -167,7 +150,6 @@ function voipBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactory> {
     // Called on logout to tear down any active call (VoipWebCore.cs, §3.9).
     // No active call possible without the engine; log only.
     handleSignOut: () => {
-      stopRing();
       ctx.log('[VoipBridge] handleSignOut — no active call (engine absent)');
     },
 
@@ -186,36 +168,39 @@ function voipBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactory> {
     // ── PONYTAIL STUBS: call control ──────────────────────────────────────
     // All require IVoip (ICE/SRTP/relay/codecs). Return void; log call site.
 
-    // StartCall — 1:1 call with multi-device fan-out (VoipWebCore.cs:154-186, §3.9).
-    // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
+    // StartCall — 1:1 call (VoipWebCore.cs:154-186, §3.9). The hybrid engine is stubbed,
+    // so hand the call off to the plain-web call layer: open the contact (by jid — works
+    // for @lid and phone peers on the same account) and start the call there.
     startCall: (
       peerJid: unknown, _deviceJids: unknown, callId: unknown,
       useVideo: unknown, ...rest: unknown[]
     ) => {
-      ctx.log('[VoipBridge] startCall (stub)', { peerJid, callId, useVideo }, rest.length, 'more args');
+      ctx.log('[VoipBridge] startCall — hand-off to call layer', { peerJid, callId, useVideo }, rest.length, 'more args');
+      const peer = String(peerJid ?? '');
+      if (peer) placeCall(peer, !!useVideo);
+      else showCallLayer();
     },
 
     // EndCall — tear down active call (doc 41 §3.2).
     // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     endCall: (callId: unknown, ...rest: unknown[]) => {
-      stopRing();
       ctx.log('[VoipBridge] endCall (stub)', callId, ...rest);
     },
 
     // RejectCallWithoutCallContext — reject before engine has call context.
     // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     rejectCallWithoutCallContext: (...args: unknown[]) => {
-      stopRing();
       ctx.log('[VoipBridge] rejectCallWithoutCallContext (stub)', ...args);
     },
 
-    // StartGroupCall — group call with per-participant device arrays (§3.10).
-    // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
+    // StartGroupCall — group call with per-participant device arrays (§3.10). No
+    // dialable deep-link for a group, so just surface the call layer for a manual start.
     startGroupCall: (
       _pnUserJids: unknown, _lidUserJids: unknown, _deviceJidsCsv: unknown,
       callId: unknown, hasVideo: unknown, groupJid: unknown, ...rest: unknown[]
     ) => {
-      ctx.log('[VoipBridge] startGroupCall (stub)', { callId, hasVideo, groupJid }, rest.length, 'more args');
+      ctx.log('[VoipBridge] startGroupCall — surface call layer', { callId, hasVideo, groupJid }, rest.length, 'more args');
+      showCallLayer();
     },
 
     // InviteToCall — add participant to an ongoing group call.
@@ -301,7 +286,6 @@ function voipSignalingBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactor
     ) => {
       ctx.log('[VoipSignalingBridge] handleIncomingSignalingOffer (stub)', { peerJid, msgPlatform, msgT });
       showIncomingCallToast(ctx, String(peerJid ?? ''));
-      ring();
     },
 
     // HandleIncomingSignalingMessage — mid-call signaling (rekey, update, etc.).
