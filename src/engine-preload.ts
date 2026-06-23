@@ -110,8 +110,24 @@ contextBridge.executeInMainWorld({
       p.log('requireLazy ready; coI=' + String(w.crossOriginIsolated) + ' SAB=' + (typeof SharedArrayBuffer));
       patchOutboundSignaling(rl);
       let voipLoaded = false;
-      setTimeout(() => { if (!voipLoaded) p.log('WAWebVoipStackInterfaceWeb load TIMEOUT (20s) — chunk not fetching/registered'); }, 20000);
-      rl(['WAWebVoipStackInterfaceWeb'], (mod) => {
+      setTimeout(() => { if (!voipLoaded) p.log('WAWebVoipStackInterfaceWeb load TIMEOUT (20s) — calling not forced / chunk gated off'); }, 20000);
+      // The voip module's lazy chunk only fetches when web-calling is enabled. Logged-out has no
+      // server flag, so force the AB props ON, THEN load the stack INSIDE the callback — racing it
+      // (loading the module before the hook is installed) leaves requireLazy hanging forever.
+      rl(['WAWebABProps'], (abMod) => {
+        const AB = abMod as Record<string, unknown> | null;
+        if (AB && typeof AB.setGetABPropConfigValueImpl === 'function') {
+          const FORCE: Record<string, boolean> = { enable_web_calling: true, enable_web_group_calling: true };
+          const origAb = typeof AB.getABPropConfigValue === 'function' ? (AB.getABPropConfigValue as (k: string) => unknown).bind(AB) : null;
+          let inHook = false;
+          (AB.setGetABPropConfigValueImpl as (fn: (k: string) => unknown) => void)((key) => {
+            if (key in FORCE) return FORCE[key];
+            if (inHook || !origAb) return undefined;
+            inHook = true; try { return origAb(key); } finally { inHook = false; }
+          });
+          p.log('forced web-calling AB props ON');
+        } else { p.log('WAWebABProps.setGetABPropConfigValueImpl missing'); }
+        rl(['WAWebVoipStackInterfaceWeb'], (mod) => {
         voipLoaded = true;
         p.log('WAWebVoipStackInterfaceWeb loaded');
         const m = mod as Record<string, unknown> | null;
@@ -128,7 +144,8 @@ contextBridge.executeInMainWorld({
         // Flush everything queued before the stack was ready, in arrival order
         // (voipInit precedes any offer that came after it).
         for (const [m, a] of pendingControl.splice(0)) call(m, a);
-      });
+        });   // end rl(WAWebVoipStackInterfaceWeb)
+      });     // end rl(WAWebABProps)
     };
 
     const call = (method: string, args: unknown[]) => {
