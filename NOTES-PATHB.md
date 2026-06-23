@@ -153,6 +153,86 @@ Overall feasibility:
 
 ---
 
+---
+
+## Round-trip test (`WA_ROUNDTRIP=1`)
+
+### What this test proves
+
+When a **real** incoming-call offer (Signal-decrypted by the hybrid window's
+`VoipSignalingBridge`) is fed to the headless WASM engine, does the engine emit any outbound
+`IVoipBridgeToWeb` callback? If yes (`emittedSignaling:true`) the engine is **drivable
+end-to-end** from outside and Option B (headless WASM core) is fully feasible.
+
+### Run command
+
+```bash
+WA_ROUNDTRIP=1 WA_ENGINE_SHOW=1 WA_BRIDGE_DEBUG=1 ELECTRON_DISABLE_SANDBOX=1 npm start 2>&1 | tee /tmp/roundtrip.log
+```
+
+- `WA_ROUNDTRIP=1` — creates the hybrid main window (native bridges, `?windows=1`) **plus** a
+  plain-web engine window (`persist:wa-engine`). The engine window auto-initializes the WASM stack
+  (subscribe + voipInit) 4 s after page load.
+- `WA_ENGINE_SHOW=1` — reveals the engine window so you can scan its QR code to pair it as a
+  linked device (required so the engine window's session is active and the WASM module loads).
+- `WA_BRIDGE_DEBUG=1` — forwards all console output from both windows to stdout, including every
+  `[roundtrip]` line.
+
+Optional: trigger an outbound test call instead of waiting for an incoming offer:
+
+```bash
+WA_ROUNDTRIP=1 WA_ROUNDTRIP_STARTCALL=19195550001@s.whatsapp.net WA_ENGINE_SHOW=1 WA_BRIDGE_DEBUG=1 ELECTRON_DISABLE_SANDBOX=1 npm start
+```
+
+### Prerequisites
+
+1. **Hybrid window must be logged in** (your primary WhatsApp account, default session).
+2. **Engine window must be paired** as a separate linked device — scan the engine window's QR
+   code on first run. The engine session is stored in `persist:wa-engine` and persists across runs.
+3. **Trigger an incoming call**: from a second device/account, call the account logged into the
+   hybrid window. The offer is Signal-decrypted by the hybrid bridge and forwarded to the WASM
+   engine over IPC within ~100 ms.
+
+### What each `[roundtrip]` log line means
+
+| Tag | Meaning |
+|-----|---------|
+| `INIT-START` | `p.onRunRoundtrip` triggered; WASM factory loading via requireLazy |
+| `INIT-FAIL` | Module absent or factory threw; check `why` field |
+| `STACK-OK` | Factory returned a non-null instance; `type` field shows the stack variant |
+| `SUBSCRIBE` | `stack.subscribe(sink)` result; `order:before-voipInit` is the happy path |
+| `VOIP-INIT` | `stack.voipInit(placeholderJids)` result |
+| `VOIP-INIT-RETRY` | Retry with subscribe-then-init order (fired if VOIP-INIT failed) |
+| `OFFER-FED` | Real offer from hybrid bridge fed to `stack.handleIncomingSignalingOffer` |
+| `ENGINE-OUTBOUND` | Engine called a method on the subscribe sink (a ToWeb callback fired) |
+| `KEY-CALLBACK` | Engine callback contains key/cipher/ssrc — the engine is demanding crypto material |
+| `START-CALL` | `stack.startCall()` result (only if `WA_ROUNDTRIP_STARTCALL` was set) |
+| `VERDICT` | Final summary — read this to assess feasibility |
+
+### How to read the VERDICT
+
+```json
+{"emittedSignaling": true/false, "callbacks": [...], "keyCallbacks": [...]}
+```
+
+| emittedSignaling | callbacks contain | Interpretation |
+|-----------------|-------------------|----------------|
+| `true` | `handleSignalingXmpp` or `handleVoipCall` | **GREEN** — engine is drivable end-to-end; Option B is feasible |
+| `false` | `requestDeviceJidList`, `requestLidJid` | **YELLOW** — engine is live and making demands; need real JIDs to progress |
+| `false` | `[]` (empty) | **RED-SILENT** — engine accepted offer but did nothing; check `STACK-OK` and `VOIP-INIT` |
+| any | keyCallbacks non-empty | Engine is demanding crypto material; need real session keys to go further |
+
+The 30 s verdict fires automatically. A `handleSignalingXmpp` callback triggers an early verdict
+(2 s after first firing) so you don't have to wait the full 30 s.
+
+### If `INIT-FAIL why:module absent`
+
+The engine window's session partition (`persist:wa-engine`) may not have the WASM voip chunk in
+its cache. Scan the QR and let the engine window fully load (watch `[engine-console]` lines for
+socket activity). Try again after the session is active.
+
+---
+
 ## Key facts from prior reverse-engineering (doc 43)
 
 These are **predictions** from static analysis, not measured results of this probe:

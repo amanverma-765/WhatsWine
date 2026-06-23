@@ -57,6 +57,15 @@ const ENGINE_MODE = process.env.WA_ENGINE_MODE === '1' && !CALL_MODE;
 const PATHB_MODE  = process.env.WA_PATHB       === '1';
 const PATHB_SMOKE = process.env.WA_PATHB_SMOKE === '1' && PATHB_MODE;
 
+// ROUND-TRIP TEST (WA_ROUNDTRIP=1): run hybrid main window (installBridges, ?windows=1)
+// PLUS a plain-web engine window (persist:wa-engine). The engine window auto-initializes
+// the WASM stack (subscribe+voipInit) 4 s after load. When a real incoming-call offer
+// arrives at the hybrid VoipBridge, it is forwarded to the WASM stack over IPC; the
+// Proxy-based subscribe sink in engine-preload.ts captures all outbound callbacks and
+// logs a [roundtrip] VERDICT {emittedSignaling, callbacks, keyCallbacks} line.
+// Optional: WA_ROUNDTRIP_STARTCALL=<peerJid> triggers stack.startCall() after init.
+const ROUNDTRIP_MODE = process.env.WA_ROUNDTRIP === '1';
+
 if (CALL_MODE) {
   app.setPath('userData', path.join(app.getPath('appData'), 'whatswine-call'));
   // SharedArrayBuffer safety net for the WASM voip gate. We do NOT force COOP ourselves — WhatsApp
@@ -77,6 +86,12 @@ if (ENGINE_MODE) {
 
 if (PATHB_MODE) {
   // Path B probe window is plain-web with WASM voip — needs SAB and audio, same as CALL_MODE.
+  app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
+  app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
+}
+
+if (ROUNDTRIP_MODE) {
+  // Engine window is plain-web with WASM voip — same SAB + audio requirements.
   app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
   app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
 }
@@ -485,7 +500,7 @@ app.on('ready', () => {
   createTray();
   // Method 3 spike: create the hidden engine window after the bridges are installed
   // (voip.ts registers the outbound relay during installBridges() above).
-  if (ENGINE_MODE) createEngineWindow();
+  if (ENGINE_MODE || ROUNDTRIP_MODE) createEngineWindow();
 });
 
 // With a tray the app keeps running when the window is hidden; quit only on explicit Quit.

@@ -61,6 +61,14 @@ const prim = {
     ipcRenderer.on('wa-engine:push-ack',       (_e, pl) => h(pl)),
   onRunPathB:      (h: () => void) =>
     ipcRenderer.on('wa-engine:run-pathb',      () => h()),
+
+  // round-trip test channels
+  sendRoundtripEvent:   (method: string, args: unknown[]) =>
+    ipcRenderer.send('wa-engine:roundtrip-outbound', method, args),
+  sendRoundtripVerdict: (data: unknown) =>
+    ipcRenderer.send('wa-engine:roundtrip-verdict', data),
+  onRunRoundtrip: (h: (payload: unknown) => void) =>
+    ipcRenderer.on('wa-engine:run-roundtrip', (_e, payload) => h(payload)),
 };
 
 // Expose to page JS so ENGINE_DIAGNOSTIC_JS in engine-window.ts can call
@@ -78,6 +86,12 @@ contextBridge.executeInMainWorld({
     const getRequireLazy = (): ((mods: string[], cb: (m: unknown) => void) => void) | null =>
       (window as unknown as { requireLazy?: (mods: string[], cb: (m: unknown) => void) => void })
         .requireLazy ?? null;
+
+    // ── Round-trip shared state ───────────────────────────────────────────────
+    // Set by p.onRunRoundtrip after the WASM stack factory is called.
+    // Consumed by p.onPushOffer to feed real offers directly to the pre-init stack.
+    let rtStack: Record<string, unknown> | null = null;
+    const rtFiredCallbacks: string[] = [];
 
     // ── 1. Module probe ────────────────────────────────────────────────────────
     // Runs after a short delay to give the bundle time to initialize its module
@@ -171,6 +185,32 @@ contextBridge.executeInMainWorld({
         peerJid: string;
       };
       console.log('[wa-engine-preload] push-offer for', pl.peerJid);
+
+      // ROUNDTRIP mode: use the pre-initialized factory instance (rtStack) directly.
+      // rtStack is set by p.onRunRoundtrip after subscribe+voipInit succeed.
+      // Using the instance avoids re-loading the module on every offer AND ensures we
+      // call handleIncomingSignalingOffer on the concrete stack object (not the module).
+      if (rtStack) {
+        if (typeof rtStack.handleIncomingSignalingOffer === 'function') {
+          try {
+            (rtStack.handleIncomingSignalingOffer as (...a: unknown[]) => void)(
+              pl.xmlNodeBase64, pl.msgPlatform, pl.msgVersion,
+              pl.msgE, pl.msgT, pl.msgOffline, pl.isOfferNotContact, pl.peerJid,
+            );
+            console.log('[roundtrip] OFFER-FED', JSON.stringify({ peerJid: pl.peerJid }));
+          } catch (e) {
+            console.error('[roundtrip] OFFER-ERROR', String((e as Error)?.message ?? e));
+          }
+        } else {
+          console.warn('[roundtrip] handleIncomingSignalingOffer not a fn on rtStack');
+        }
+        return; // don't fall through to the module-reload path
+      }
+
+      // ENGINE_MODE (no round-trip): re-load the module per call (best-effort).
+      // ponytail: this path calls handleIncomingSignalingOffer on the MODULE, which is
+      // wrong (it's on the factory instance). It works only if the module itself exposes
+      // the method directly — use WA_ROUNDTRIP=1 for a correct instance-based flow.
       const req = getRequireLazy();
       if (!req) {
         console.warn('[wa-engine-preload] requireLazy not available for push-offer');
@@ -596,6 +636,159 @@ contextBridge.executeInMainWorld({
         }
       }
     }); // end p.onRunPathB
+
+    // ── Round-trip test (WA_ROUNDTRIP=1) ─────────────────────────────────────
+    // Triggered by wa-engine:run-roundtrip IPC ~4 s after page load.
+    // Initializes the WASM stack via the U1a factory path, wires a Proxy-based
+    // subscribe sink that captures ALL IVoipBridgeToWeb callbacks, then calls
+    // voipInit() so the stack is ready to accept real offers from the hybrid window.
+    //
+    // When a real incoming-call offer arrives via wa-engine:push-offer (forwarded
+    // from the hybrid VoipSignalingBridge), p.onPushOffer feeds it to rtStack
+    // (the pre-initialized instance) instead of re-loading the module.
+    //
+    // If the stack emits any outbound signaling (handleSignalingXmpp, handleVoipCall,
+    // etc.) the Proxy sink captures it and sends a [roundtrip] ENGINE-OUTBOUND log +
+    // an IPC event to main. A VERDICT is logged after 30 s (or sooner when signaling
+    // fires).
+    p.onRunRoundtrip((payload) => {
+      const pl  = payload as { startCallJid?: string | null };
+      const startCallJid: string | null = pl.startCallJid ?? null;
+      const rt  = (tag: string, data: unknown) =>
+        console.log('[roundtrip] ' + tag + ' ' + JSON.stringify(data));
+
+      rt('INIT-START', { startCallJid });
+
+      const rl = getRequireLazy();
+      if (!rl) { rt('INIT-FAIL', { why: 'requireLazy absent' }); return; }
+
+      rl(['WAWebVoipStackInterfaceWeb'], (mod) => {
+        const m = mod as Record<string, unknown> | null;
+        if (!m || typeof m.createWAWebVoipStackInterface !== 'function') {
+          rt('INIT-FAIL', { why: 'module absent or no factory', modNull: !m });
+          return;
+        }
+
+        let inst: Record<string, unknown> | null = null;
+        try {
+          inst = (m.createWAWebVoipStackInterface as () => unknown)() as Record<string, unknown>;
+        } catch (e1) {
+          try {
+            inst = (m.createWAWebVoipStackInterface as (c: unknown) => unknown)({}) as Record<string, unknown>;
+          } catch (e2) {
+            rt('INIT-FAIL', {
+              why: 'factory threw both ways',
+              e1: String((e1 as Error)?.message ?? e1),
+              e2: String((e2 as Error)?.message ?? e2),
+            });
+            return;
+          }
+        }
+        if (!inst) { rt('INIT-FAIL', { why: 'factory returned null' }); return; }
+
+        const stack = inst; // non-nullable alias for closures
+        rtStack = stack;
+        rt('STACK-OK', { type: stack.type ?? 'unknown' });
+
+        // Verdict state — defined before sink so the sink can trigger early verdict.
+        let verdictSent = false;
+        const sendVerdict = () => {
+          if (verdictSent) return;
+          verdictSent = true;
+          const sigCbs  = ['handleSignalingXmpp', 'handleVoipCall', 'handleVoipReady'];
+          const keyCbs  = rtFiredCallbacks.filter(n => /key|cipher|ssrc|hkdf|hmac|derive/i.test(n));
+          const emittedSignaling = rtFiredCallbacks.some(n => sigCbs.includes(n));
+          const verdict = { emittedSignaling, callbacks: [...rtFiredCallbacks], keyCallbacks: keyCbs };
+          rt('VERDICT', verdict);
+          p.sendRoundtripVerdict(verdict);
+        };
+
+        // Proxy sink — intercepts ALL IVoipBridgeToWeb callbacks.
+        // subscribe() will call methods on this object for every outbound engine event.
+        const sink = new Proxy({} as Record<string, unknown>, {
+          get: (_t, prop) => (...args: unknown[]) => {
+            const name = String(prop);
+            rtFiredCallbacks.push(name);
+            const argsPreview = JSON.stringify(args).slice(0, 400);
+            rt('ENGINE-OUTBOUND', { method: name, argsPreview });
+            if (/key|cipher|ssrc|hkdf|hmac|derive/i.test(name + argsPreview)) {
+              rt('KEY-CALLBACK', { name, argsPreview });
+            }
+            p.sendRoundtripEvent(name, args);
+            // Early verdict when signaling fires (2 s grace for cascading callbacks)
+            if (name === 'handleSignalingXmpp' || name === 'handleVoipCall') {
+              setTimeout(sendVerdict, 2000);
+            }
+          },
+        });
+
+        // subscribe() BEFORE voipInit so the sink is wired before init fires any events.
+        let subscribeOk = false;
+        if (typeof stack.subscribe === 'function') {
+          try {
+            (stack.subscribe as (s: unknown) => void)(sink);
+            subscribeOk = true;
+            rt('SUBSCRIBE', { ok: true, order: 'before-voipInit' });
+          } catch (e) {
+            rt('SUBSCRIBE', { ok: false, error: String((e as Error)?.message ?? e) });
+          }
+        } else {
+          rt('SUBSCRIBE', { ok: false, why: 'subscribe not a fn on stack' });
+        }
+
+        // voipInit(myDeviceJid, myUserJid, selfLidDeviceJid) — doc 41 §3.2
+        // Placeholder JIDs: the WASM engine may demand real values later (key derivation)
+        // but should boot without them (U2 proved voipInit ok:true logged-out).
+        if (typeof stack.voipInit === 'function') {
+          try {
+            (stack.voipInit as (...a: unknown[]) => void)(
+              '0:0@lid', '0@s.whatsapp.net', '0:0@lid',
+            );
+            rt('VOIP-INIT', { ok: true, subscribeFirst: subscribeOk });
+          } catch (e) {
+            rt('VOIP-INIT', { ok: false, error: String((e as Error)?.message ?? e) });
+            // Retry: subscribe-then-voipInit in case order matters
+            if (!subscribeOk && typeof stack.subscribe === 'function') {
+              try {
+                (stack.subscribe as (s: unknown) => void)(sink);
+                (stack.voipInit as (...a: unknown[]) => void)(
+                  '0:0@lid', '0@s.whatsapp.net', '0:0@lid',
+                );
+                rt('VOIP-INIT-RETRY', { ok: true });
+              } catch (e2) {
+                rt('VOIP-INIT-RETRY', { ok: false, error: String((e2 as Error)?.message ?? e2) });
+              }
+            }
+          }
+        } else {
+          rt('VOIP-INIT', { ok: false, why: 'voipInit not a fn on stack' });
+        }
+
+        // Optional outbound: startCall if WA_ROUNDTRIP_STARTCALL=<peerJid> was set.
+        // Arity-7 minimum (doc 41 §3.9); fill placeholders for the unknown trailing args.
+        if (startCallJid && typeof stack.startCall === 'function') {
+          setTimeout(() => {
+            try {
+              (stack.startCall as (...a: unknown[]) => void)(
+                startCallJid,
+                [startCallJid],                     // deviceJids[]
+                'CAFEBABE00000001CAFEBABE00000001', // fake callId
+                false,                              // useVideo
+                startCallJid,                       // phoneNumberJid
+                false,                              // isLidCall
+                true,                               // isFromDialer
+              );
+              rt('START-CALL', { called: true, peerJid: startCallJid });
+            } catch (e) {
+              rt('START-CALL', { called: false, error: String((e as Error)?.message ?? e) });
+            }
+          }, 1000);
+        }
+
+        // 30 s fallback verdict — fires even if no callbacks were received.
+        setTimeout(sendVerdict, 30000);
+      });
+    }); // end p.onRunRoundtrip
 
     // Kick off the Method-3 probe after the bundle has had time to boot its module registry.
     // 4 s is generous; the bundle typically initializes requireLazy within 1–2 s.

@@ -206,6 +206,14 @@ export function createEngineWindow(): void {
 
   wc.on('did-finish-load', () => {
     console.log('[engine] loaded:', wc.getURL());
+    if (process.env.WA_ROUNDTRIP === '1') {
+      setTimeout(() => {
+        engineSend('wa-engine:run-roundtrip', {
+          startCallJid: process.env.WA_ROUNDTRIP_STARTCALL ?? null,
+        });
+        console.log('[roundtrip] sent run-roundtrip trigger to engine window');
+      }, 4000);
+    }
   });
   wc.on('did-fail-load', (_e, code, desc, url) => {
     console.error('[engine] did-fail-load:', code, desc, url);
@@ -368,6 +376,15 @@ function installEngineIpc(): void {
   // that motivated this two-window architecture.)
   ipcMain.on('wa-engine:probe-result', (_e, result: unknown) => {
     console.log('[engine] probe result:', JSON.stringify(result));
+  });
+
+  // Round-trip test: engine→app callbacks forwarded from the Proxy sink in engine-preload.
+  // Logged here for visibility; the real signal is the [roundtrip] VERDICT line.
+  ipcMain.on('wa-engine:roundtrip-outbound', (_e, method: string, args: unknown[]) => {
+    console.log('[roundtrip] ENGINE-OUTBOUND (main):', method, JSON.stringify(args).slice(0, 300));
+  });
+  ipcMain.on('wa-engine:roundtrip-verdict', (_e, verdict: unknown) => {
+    console.log('[roundtrip] VERDICT (main):', JSON.stringify(verdict));
   });
 
   // Engine outbound signaling → relay to hybrid page's sharedTw ToWeb bus.
