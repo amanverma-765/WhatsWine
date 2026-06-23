@@ -185,6 +185,25 @@ contextBridge.executeInMainWorld({
       if (hooked) { callEventsHooked = true; p.log('onCallEvent hooked on ' + hooked + ' table(s)'); }
     };
 
+    // The reliable funnel: WAWebVoipHandleNativeCallEvent.handleWAWebVoipNativeCallEvent(eventType,
+    // eventDataJson) — both onCallEvent paths converge here and it runs in the frontend (its handlers
+    // call frontendFireAndForget). Wrap the module export to relay every event to the hybrid.
+    let nceHooked = false;
+    const hookNativeCallEvent = (rl: RL) => {
+      rl(['WAWebVoipHandleNativeCallEvent'], (mod) => {
+        const H = mod as Record<string, unknown> | null;
+        if (!H || typeof H.handleWAWebVoipNativeCallEvent !== 'function' || nceHooked) return;
+        nceHooked = true;
+        const orig = H.handleWAWebVoipNativeCallEvent as (...a: unknown[]) => unknown;
+        H.handleWAWebVoipNativeCallEvent = (eventType: unknown, eventDataJson: unknown, ...rest: unknown[]) => {
+          p.log('handleNativeCallEvent fired: type=' + String(eventType) + ' (' + typeof eventType + ')');
+          try { p.nativeEvent(eventType, eventDataJson); } catch (e) { p.log('nce relay err ' + String(e)); }
+          return orig(eventType, eventDataJson, ...rest);
+        };
+        p.log('handleWAWebVoipNativeCallEvent hooked');
+      });
+    };
+
     const methodNames = (obj: unknown): string[] => {
       const out = new Set<string>();
       let o = obj as object | null;
@@ -271,6 +290,7 @@ contextBridge.executeInMainWorld({
       patchOutboundSignaling(rl);
       forceCalling(rl);
       loadWapModules(rl);
+      hookNativeCallEvent(rl);
       setTimeout(() => { readGating(rl); loadVoip(rl); }, 1200);
     };
 
