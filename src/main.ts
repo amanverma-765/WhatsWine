@@ -5,8 +5,10 @@ import started from 'electron-squirrel-startup';
 import { appIcon } from './icon';
 import { installSoundPlayer } from './sound';
 import { installRingtone } from './ringtone';
-import { showMainWindow } from './window';
+import { registerMainWindow, showMainWindow } from './window';
 import { installBridges } from './bridge/registry';
+import { WA_ORIGIN, WA_HOST_ORIGIN, cleanUserAgent } from './waConfig';
+import { createCallWindow } from './callWindow';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
@@ -19,8 +21,6 @@ if (started) {
 // `window.chrome.webview.hostObjects.*` native bridges (installed in
 // src/bridge/). `windows=1` is load-bearing — without it the bundle stays in
 // plain web mode and never touches the bridges.
-const WA_ORIGIN = 'https://web.whatsapp.com/';
-const WA_HOST_ORIGIN = new URL(WA_ORIGIN).origin;   // 'https://web.whatsapp.com'
 
 // The bundle reads `windowsBuild` as `quaternary: Number(windowsBuild)` of the
 // ClientPayload UserAgent.appVersion (UINT32) — so it MUST be a single integer,
@@ -34,26 +34,14 @@ const OS_BUILD = '22631';
 // A real WebView2/Edge version string for the request header (not parsed as int).
 const WEBVIEW2_VERSION = '120.0.2210.144';
 
-// CALL MODE (WA_CALL_MODE=1): run the session as PLAIN WEB (no windows params) so the bundle binds
-// its own in-browser WASM voip stack and real WhatsApp calling works (doc 43). This is a SEPARATE
-// mode from the native hybrid app: the two are mutually exclusive in one session (the WASM voip
-// stack isn't loadable under ?windows=1), so call mode skips the native host-object bridges and
-// runs from its own profile (effectively a separate linked device).
-const CALL_MODE = process.env.WA_CALL_MODE === '1';
-
-if (CALL_MODE) {
-  app.setPath('userData', path.join(app.getPath('appData'), 'whatswine-call'));
-  // SharedArrayBuffer safety net for the WASM voip gate. We do NOT force COOP ourselves — WhatsApp
-  // serves the COOP/COEP that makes the page crossOriginIsolated, and forcing it from the shell
-  // severs the call popout's window.opener so the popout renders blank (doc 43 §4).
-  app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
-  // Linux: the Chromium audio-service sandbox often can't reach PulseAudio/PipeWire, so the OS mic
-  // never opens and getUserMedia hands back a silent zeros track instead of failing (electron#23792).
-  app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
-}
+// SharedArrayBuffer is needed by the call window's WASM voip stack and is
+// harmless for the hybrid window. AudioServiceSandbox causes the OS mic to be
+// unreachable under PulseAudio/PipeWire on Linux (getUserMedia returns a silent
+// zeros track instead of failing — electron#23792). Apply both unconditionally.
+app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
+app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
 
 function buildUrl(): string {
-  if (CALL_MODE) return WA_ORIGIN;   // plain web => WAWebEnvironment.isWindows === false => WASM voip stack
   const p = new URLSearchParams({
     windows: '1',
     windowsBuild: WINDOWS_BUILD,
@@ -63,52 +51,6 @@ function buildUrl(): string {
     osBuild: OS_BUILD,
   });
   return `${WA_ORIGIN}?${p.toString()}`;
-}
-
-// WhatsApp Web rejects/deprecates unknown user agents; drop the `Electron` token
-// and the app-name token (e.g. "WhatsWine/1.0.0") so it sees a vanilla Chrome
-// (keeping the real Chromium version). Built from app.getName() so a productName
-// rename can't reintroduce the "update your browser" page.
-const cleanUserAgent = (ua: string) =>
-  ua.replace(/ Electron\/[^ ]+/, '').replace(new RegExp(` ${app.getName()}/[^ ]+`), '');
-
-// Page shims for call mode, injected into the main window AND the call popout:
-//  (1) Report mic/camera as granted — Electron auto-grants getUserMedia, but has no address-bar
-//      permission UI for WhatsApp's pre-call permission check to point at.
-//  (2) Force the web-calling AB props on so the call button renders (default is server-gated off).
-//      Best-effort and version-coupled to the bundle's module system (doc 43 §6 Phase 3).
-const CALL_SHIMS_JS = `(() => {
-  if (window.__waCallShims) return;
-  window.__waCallShims = true;
-  if (navigator.permissions && navigator.permissions.query) {
-    const orig = navigator.permissions.query.bind(navigator.permissions);
-    navigator.permissions.query = (d) => (d && (d.name === 'microphone' || d.name === 'camera'))
-      ? Promise.resolve({ state: 'granted', onchange: null, addEventListener(){}, removeEventListener(){} })
-      : orig(d);
-  }
-  const req = window.requireLazy;
-  if (!req) return;
-  const FORCE = { enable_web_calling: true, enable_web_group_calling: true };
-  let tries = 0;
-  const tick = () => {
-    try {
-      req(['WAWebABProps'], (AB) => {
-        if (!AB || typeof AB.setGetABPropConfigValueImpl !== 'function') { if (++tries < 30) setTimeout(tick, 1000); return; }
-        let inHook = false;
-        const orig = AB.getABPropConfigValue ? AB.getABPropConfigValue.bind(AB) : null;
-        AB.setGetABPropConfigValueImpl((key) => {
-          if (key in FORCE) return FORCE[key];
-          if (inHook || !orig) return undefined;
-          inHook = true; try { return orig(key); } finally { inHook = false; }
-        });
-      });
-    } catch (e) { if (++tries < 30) setTimeout(tick, 1000); }
-  };
-  tick();
-})()`;
-
-function installCallShims(target: Electron.WebContents): void {
-  target.on('dom-ready', () => { target.executeJavaScript(CALL_SHIMS_JS).catch(() => undefined); });
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -137,6 +79,9 @@ function createTray() {
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: 'Show WhatsApp', click: showWindow },
+      // Calling opens (or focuses) the second plain-web window that runs as a
+      // separate linked device with real WASM-backed calling.
+      { label: 'Calling', click: () => createCallWindow() },
       { type: 'separator' },
       { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
     ]),
@@ -151,17 +96,19 @@ const createWindow = () => {
   const userAgent = cleanUserAgent(session.defaultSession.getUserAgent());
   session.defaultSession.setUserAgent(userAgent);
 
-  // The hybrid shell sends a per-request version header (doc 31 §3.5). Not in call mode —
-  // X-WA-WebView2-Version is a windows-hybrid signal, and sending it makes WA serve the hybrid
-  // bundle into the plain-web page (white screen).
+  // The hybrid shell sends a per-request version header (doc 31 §3.5).
+  // X-WA-WebView2-Version is a windows-hybrid signal; it must only reach the
+  // default session (hybrid window). The call window uses its own partition.
   session.defaultSession.webRequest.onBeforeSendHeaders((details, cb) => {
-    if (!CALL_MODE && details.url.startsWith(WA_ORIGIN)) {
+    if (details.url.startsWith(WA_ORIGIN)) {
       details.requestHeaders['X-WA-WebView2-Version'] = WEBVIEW2_VERSION;
     }
     cb({ requestHeaders: details.requestHeaders });
   });
 
-  // WhatsApp needs notifications (native toasts) + media (mic/camera for voice/video calls).
+  // WhatsApp needs notifications (native toasts) and clipboard write access.
+  // Media (mic/camera) is not needed for the hybrid window — calling goes through
+  // the separate call window partition.
   session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
     callback(
       permission === 'notifications' ||
@@ -169,19 +116,10 @@ const createWindow = () => {
       permission === 'clipboard-sanitized-write',
     );
   });
-  if (CALL_MODE) {
-    // Let the call window open mic/cam devices (getUserMedia with a deviceId goes through this,
-    // separate from the request handler above).
-    session.defaultSession.setDevicePermissionHandler(() => true);
-  }
   // CRITICAL: WA Web rolls back a successful login if it can't make storage persistent
-  // ("aquire-persistent-storage-denied"). The Windows client force-grants it; mirror that so
-  // navigator.storage.persist() succeeds and the session sticks. Gate to the WA origin only.
-  // In call mode also always allow media: a `media` check uses requestingOrigin, which can be
-  // empty/differ for the capture frame/worker, and a denied check makes getUserMedia return a
-  // silent track (electron#23792).
+  // ("aquire-persistent-storage-denied"). The Windows client force-grants it; mirror that
+  // so navigator.storage.persist() succeeds and the session sticks. Gate to WA origin only.
   session.defaultSession.setPermissionCheckHandler((_wc, permission, origin) => {
-    if (CALL_MODE && ['media', 'microphone', 'camera', 'speaker-selection'].includes(permission)) return true;
     return origin === WA_HOST_ORIGIN;
   });
 
@@ -202,6 +140,11 @@ const createWindow = () => {
       sandbox: true,
     },
   });
+
+  // Register so showMainWindow() and voip.ts toast clicks always target this window,
+  // not the call window (which is created later and would otherwise be found first in
+  // some Electron window-list orderings).
+  registerMainWindow(mainWindow);
 
   const wc = mainWindow.webContents;
 
@@ -244,26 +187,19 @@ const createWindow = () => {
     });
   }
 
-  // Open external links / window.open targets in the OS browser, never in-app — EXCEPT the call
-  // popout, which WhatsApp opens as a same-origin window.open ("[sw] popout"). In call mode, allow
-  // same-origin WA popups in-app so the call window can open; deny + externalize everything else.
-  // Don't override webPreferences for the popout: an explicit set can spawn it in a fresh context,
-  // severing window.opener (which /call/popout needs). Electron 42 defaults are already secure.
+  // Open external links / window.open targets in the OS browser, never in-app.
+  // The hybrid window never needs in-app WA popouts (that's the call window's job).
+  // Never let the top frame navigate off web.whatsapp.com — the permission grants
+  // are origin-gated to WA, so a foreign page here would be in-app phishing.
   wc.setWindowOpenHandler(({ url }) => {
-    let sameOriginWa = false;
-    try { sameOriginWa = new URL(url).origin === WA_HOST_ORIGIN; } catch { /* about:blank etc. */ }
-    if (CALL_MODE && (sameOriginWa || url === 'about:blank' || url === '')) {
-      return { action: 'allow', overrideBrowserWindowOptions: { width: 480, height: 720, autoHideMenuBar: true } };
-    }
     if (url.startsWith('http://') || url.startsWith('https://')) {
       shell.openExternal(url);
     }
     return { action: 'deny' };
   });
 
-  // Keep the native-context query string on every top-level (re)navigation to the WA root,
-  // mirroring AlwaysUseArgumentsForDocumentRequested (doc 31 §3.5). Skipped in call mode:
-  // buildUrl() has no `windows` param there, so this would reload forever.
+  // Keep the native-context query string on every top-level (re)navigation to the WA
+  // root, mirroring AlwaysUseArgumentsForDocumentRequested (doc 31 §3.5).
   const reassertParams = (e: { url: string; preventDefault: () => void }) => {
     try {
       const u = new URL(e.url);
@@ -277,10 +213,8 @@ const createWindow = () => {
       }
     } catch { /* ignore non-URL navigations */ }
   };
-  if (!CALL_MODE) {
-    wc.on('will-navigate', reassertParams);
-    wc.on('will-redirect', reassertParams);
-  }
+  wc.on('will-navigate', reassertParams);
+  wc.on('will-redirect', reassertParams);
 
   wc.on('page-title-updated', (_e, title) => updateUnread(title));
 
@@ -288,23 +222,6 @@ const createWindow = () => {
   // (idempotent self-guard). The native SystemIntegrations.playTone bridge triggers
   // it from the main process (src/sound.ts).
   wc.on('dom-ready', () => { installSoundPlayer(wc); installRingtone(wc); });
-
-  if (CALL_MODE) {
-    installCallShims(wc);
-    wc.on('did-create-window', (win) => {
-      // The call popout is a separate webContents (allowed above) — give it the same shims so its
-      // mic-permission gate clears and the call button/engine work there too.
-      installCallShims(win.webContents);
-      // Auto-close the popout when the call ends. WhatsApp doesn't reliably window.close() it in
-      // Electron, so it lingers showing a dark dead call screen. Its title is "WhatsApp call"
-      // during the call; once it reverts to the idle "WhatsApp" title, the call is over — close it.
-      let wasCall = false;
-      win.webContents.on('page-title-updated', (_e, title) => {
-        if (/\bcall\b/i.test(title)) { wasCall = true; return; }
-        if (wasCall && /^whatsapp\b/i.test(title) && !win.isDestroyed()) win.close();
-      });
-    });
-  }
 
   // Close button hides to tray instead of quitting (real quit via tray / before-quit).
   mainWindow.on('close', (e) => {
@@ -379,8 +296,7 @@ function runWebSmoke(wc: Electron.WebContents) {
 app.on('before-quit', () => { isQuitting = true; });
 
 app.on('ready', () => {
-  // Call mode is plain-web, so the native host-object bridges are unused — skip them (doc 43 §6).
-  if (!CALL_MODE) installBridges();
+  installBridges();
   createWindow();
   createTray();
 });

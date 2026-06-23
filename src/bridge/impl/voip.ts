@@ -27,6 +27,7 @@ import { toWeb } from '../eventtarget';
 import { appIcon } from '../../icon';
 import { startRingtone, stopRingtone } from '../../ringtone';
 import { showMainWindow } from '../../window';
+import { showCallWindow } from '../../callWindow';
 
 // ─── Ringtone control ────────────────────────────────────────────────────────
 // The bundle's WebRTC stack stays silent here (engine stubbed), so we loop the
@@ -90,6 +91,9 @@ function showIncomingCallToast(ctx: BridgeContext, peerJid: string): void {
   });
   n.on('click', () => showMainWindow());   // surface the bundle's in-app call screen
   n.show();
+  // Also raise the call window (plain-web second device) so the user can answer
+  // directly there. No-op if the call window hasn't been paired yet.
+  showCallWindow();
 }
 
 // ponytail self-check (WA_VOIP_SELFCHECK=1): jid parse + dedup, no framework.
