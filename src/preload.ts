@@ -170,6 +170,18 @@ contextBridge.executeInMainWorld({
         };
         console.log('[wabridge] frontendFireAndForget hooked');
       });
+      // Does the call model reach the FRONTEND call collection (what the UI observes), or only the
+      // backend? Hook setActiveCall in this frontend world.
+      rl(['WAWebCallCollection'], (CC) => {
+        const cc = CC as Record<string, unknown> | null;
+        const origSet = cc?.setActiveCall as ((c: unknown) => unknown) | undefined;
+        if (!cc || typeof origSet !== 'function') { console.log('[wabridge] WAWebCallCollection.setActiveCall not a fn in frontend'); return; }
+        cc.setActiveCall = (c: unknown) => {
+          console.log('[wabridge] FRONTEND setActiveCall ' + (c ? 'CALL id=' + String((c as { id?: unknown }).id) : 'null'));
+          return origSet.call(cc, c);
+        };
+        console.log('[wabridge] frontend WAWebCallCollection.setActiveCall hooked');
+      });
     };
     hookHybridDispatch();
 
