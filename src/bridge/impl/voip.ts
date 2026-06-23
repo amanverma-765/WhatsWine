@@ -32,6 +32,7 @@ import {
   pushOfferToEngine,
   pushSignalingToEngine,
   pushAckToEngine,
+  engineControl,
 } from '../../engine-window';
 
 // ─── Ringtone control ────────────────────────────────────────────────────────
@@ -154,21 +155,26 @@ function voipBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactory> {
     // handleVoipReady so the bundle does not stall waiting for engine readiness.
     voipInit: (myDeviceJid: unknown, myUserJid: unknown, selfLidDeviceJid: unknown) => {
       ctx.log('[VoipBridge] voipInit', { myDeviceJid, myUserJid, selfLidDeviceJid });
+      // Drive the headless engine's voipInit with the real identity JIDs; it will emit
+      // handleVoipReady back through the relay. Keep an immediate emit as a stall guard.
+      engineControl('voipInit', [myDeviceJid, myUserJid, selfLidDeviceJid]);
       sharedTw.call('handleVoipReady');
     },
 
     // ── FUNCTIONAL: JID-resolution reply handlers ─────────────────────────
-    // JS answers native's async requests (fired as ToWeb callbacks) for device
-    // fan-out + PN↔LID conversion (VoipSignaling.cs:186-207, §3.11).
-    // Without the engine nothing is awaiting these; log and discard.
+    // The engine asks (requestDeviceJidList/PN↔LID via the relay) → the hybrid bundle
+    // resolves and answers HERE → forward the answer back into the engine (§3.11).
     handleDeviceJidList: (peerJid: unknown, deviceJids: unknown) => {
       ctx.log('[VoipBridge] handleDeviceJidList', peerJid, deviceJids);
+      engineControl('handleDeviceJidList', [peerJid, deviceJids]);
     },
     handlePhoneNumberJid: (...args: unknown[]) => {
       ctx.log('[VoipBridge] handlePhoneNumberJid', ...args);
+      engineControl('handlePhoneNumberJid', args);
     },
     handleLidJid: (...args: unknown[]) => {
       ctx.log('[VoipBridge] handleLidJid', ...args);
+      engineControl('handleLidJid', args);
     },
 
     // ── FUNCTIONAL: handleSignOut ─────────────────────────────────────────
@@ -176,45 +182,43 @@ function voipBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactory> {
     // No active call possible without the engine; log only.
     handleSignOut: () => {
       stopRing();
-      ctx.log('[VoipBridge] handleSignOut — no active call (engine absent)');
+      ctx.log('[VoipBridge] handleSignOut');
+      engineControl('handleSignOut', []);
     },
 
-    // ── PONYTAIL STUB: relay / P2P transport preference ───────────────────
-    // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     setHideMyIp: (hide: unknown) => {
-      ctx.log('[VoipBridge] setHideMyIp (stub)', hide);
+      ctx.log('[VoipBridge] setHideMyIp', hide);
+      engineControl('setHideMyIp', [hide]);
     },
 
-    // ── PONYTAIL STUB: call overlay label ─────────────────────────────────
-    // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     setChatNameAndIcon: (...args: unknown[]) => {
-      ctx.log('[VoipBridge] setChatNameAndIcon (stub)', ...args);
+      ctx.log('[VoipBridge] setChatNameAndIcon', ...args);
+      engineControl('setChatNameAndIcon', args);
     },
 
-    // ── PONYTAIL STUBS: call control ──────────────────────────────────────
-    // All require IVoip (ICE/SRTP/relay/codecs). Return void; log call site.
+    // ── Call control → driven on the headless WASM engine ─────────────────
 
-    // StartCall — 1:1 call with multi-device fan-out (VoipWebCore.cs:154-186, §3.9).
-    // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
+    // StartCall — 1:1 outbound call with multi-device fan-out (VoipWebCore.cs:154-186, §3.9).
     startCall: (
-      peerJid: unknown, _deviceJids: unknown, callId: unknown,
+      peerJid: unknown, deviceJids: unknown, callId: unknown,
       useVideo: unknown, ...rest: unknown[]
     ) => {
-      ctx.log('[VoipBridge] startCall (stub)', { peerJid, callId, useVideo }, rest.length, 'more args');
+      ctx.log('[VoipBridge] startCall', { peerJid, callId, useVideo }, rest.length, 'more args');
+      engineControl('startCall', [peerJid, deviceJids, callId, useVideo, ...rest]);
     },
 
     // EndCall — tear down active call (doc 41 §3.2).
-    // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     endCall: (callId: unknown, ...rest: unknown[]) => {
       stopRing();
-      ctx.log('[VoipBridge] endCall (stub)', callId, ...rest);
+      ctx.log('[VoipBridge] endCall', callId, ...rest);
+      engineControl('endCall', [callId, ...rest]);
     },
 
     // RejectCallWithoutCallContext — reject before engine has call context.
-    // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     rejectCallWithoutCallContext: (...args: unknown[]) => {
       stopRing();
-      ctx.log('[VoipBridge] rejectCallWithoutCallContext (stub)', ...args);
+      ctx.log('[VoipBridge] rejectCallWithoutCallContext', ...args);
+      engineControl('rejectCallWithoutCallContext', args);
     },
 
     // StartGroupCall — group call with per-participant device arrays (§3.10).
@@ -268,13 +272,15 @@ function voipBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactory> {
     // Both names end in Async → Promise (forceAsyncMethodMatches, doc 31 §3.9).
     // Return sane defaults: 0 devices, permission not granted.
     // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
+    // Real capture lives in the engine window; report a device + granted permission so the
+    // hybrid bundle lets the call proceed (it gates the call UI on these).
     getDeviceCountAsync: async (deviceType: unknown) => {
-      ctx.log('[VoipBridge] getDeviceCountAsync (stub)', deviceType);
-      return 0;
+      ctx.log('[VoipBridge] getDeviceCountAsync', deviceType);
+      return 1;
     },
     requestObtainDevicePermissionAsync: async (deviceType: unknown) => {
-      ctx.log('[VoipBridge] requestObtainDevicePermissionAsync (stub)', deviceType);
-      return false;
+      ctx.log('[VoipBridge] requestObtainDevicePermissionAsync', deviceType);
+      return true;
     },
 
     // ── Debug stub ────────────────────────────────────────────────────────
@@ -353,29 +359,30 @@ function voipSignalingBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactor
     // HandleIncomingSignalingReceipt — delivery receipt for a signaling node.
     // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     handleIncomingSignalingReceipt: (
-      _xmlNodeBase64: unknown, peerJid: unknown,
+      xmlNodeBase64: unknown, peerJid: unknown,
     ) => {
-      ctx.log('[VoipSignalingBridge] handleIncomingSignalingReceipt (stub)', peerJid);
+      ctx.log('[VoipSignalingBridge] handleIncomingSignalingReceipt', peerJid);
+      engineControl('handleIncomingSignalingReceipt', [xmlNodeBase64, peerJid]);
     },
 
     // ResendOfferOnDecryptionFailure — engine asks JS to re-transmit encrypted
     // offer after Signal decryption failure (VoipCallbacks.cs:487-493, §3.8).
-    // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     resendOfferOnDecryptionFailure: (peerJid: unknown, callId: unknown) => {
-      ctx.log('[VoipSignalingBridge] resendOfferOnDecryptionFailure (stub)', { peerJid, callId });
+      ctx.log('[VoipSignalingBridge] resendOfferOnDecryptionFailure', { peerJid, callId });
+      engineControl('resendOfferOnDecryptionFailure', [peerJid, callId]);
     },
 
     // ResendEncRekeyRetry — engine asks JS to retry an encrypted rekey frame.
-    // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     resendEncRekeyRetry: (peerJid: unknown, retryCount: unknown) => {
-      ctx.log('[VoipSignalingBridge] resendEncRekeyRetry (stub)', { peerJid, retryCount });
+      ctx.log('[VoipSignalingBridge] resendEncRekeyRetry', { peerJid, retryCount });
+      engineControl('resendEncRekeyRetry', [peerJid, retryCount]);
     },
 
     // NotifyDeviceIdentityChangedOrDeleted — Signal session invalidation event;
     // tells the engine to reset the per-device E2E session for peerJid.
-    // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     notifyDeviceIdentityChangedOrDeleted: (peerJid: unknown, isDeleted: unknown) => {
-      ctx.log('[VoipSignalingBridge] notifyDeviceIdentityChangedOrDeleted (stub)', { peerJid, isDeleted });
+      ctx.log('[VoipSignalingBridge] notifyDeviceIdentityChangedOrDeleted', { peerJid, isDeleted });
+      engineControl('notifyDeviceIdentityChangedOrDeleted', [peerJid, isDeleted]);
     },
 
   };

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, session, shell, Tray, Menu } from 'electron';
+import { app, BrowserWindow, session, shell, Tray, Menu } from 'electron';
 import path from 'node:path';
 import { writeFileSync } from 'node:fs';
 import started from 'electron-squirrel-startup';
@@ -7,7 +7,7 @@ import { installSoundPlayer } from './sound';
 import { installRingtone } from './ringtone';
 import { showMainWindow } from './window';
 import { installBridges } from './bridge/registry';
-import { createEngineWindow, createPathBWindow } from './engine-window';
+import { createEngineWindow } from './engine-window';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
@@ -42,56 +42,19 @@ const WEBVIEW2_VERSION = '120.0.2210.144';
 // runs from its own profile (effectively a separate linked device).
 const CALL_MODE = process.env.WA_CALL_MODE === '1';
 
-// ENGINE MODE (WA_ENGINE_MODE=1): Method 3 spike — run the hybrid main window (windows=1, native
-// bridges) PLUS a hidden plain-web BrowserWindow (persist:wa-engine) that hosts the WASM voip
-// stack. Signaling from the hybrid window is forwarded to the hidden engine and vice-versa.
-// Incompatible with CALL_MODE (both are mutually exclusive). See src/engine-window.ts + NOTES.md.
-const ENGINE_MODE = process.env.WA_ENGINE_MODE === '1' && !CALL_MODE;
+// HYBRID CALLS (WA_HYBRID_CALLS=1): the hybrid main window keeps its native bridges, and a hidden,
+// logged-out plain-web engine window hosts WhatsApp's WASM voip stack as a headless media/FSM core.
+// Inbound offers from the hybrid VoipSignalingBridge are fed to the engine; the engine's outbound
+// signaling is relayed back through the hybrid VoipBridge subscribe sink and sent on the hybrid
+// socket. See src/engine-window.ts. Distinct from CALL_MODE (the plain-web-only calling build).
+const HYBRID_CALLS = process.env.WA_HYBRID_CALLS === '1' && !CALL_MODE;
 
-// PATH B MODE (WA_PATHB=1): feasibility spike — skip the hybrid main window entirely and create
-// only an ephemeral plain-web probe window (always logged-out, no QR needed). After the page
-// loads the engine-preload runs a structured U1/API/U2 investigation and prints [path-b] log
-// lines. Answers two unknowns: can WAWebVoipStackInterfaceWeb be loaded pre-login (U1), and what
-// does the stack demand when fed a synthetic offer (U2)? See NOTES-PATHB.md and engine-window.ts.
-// WA_PATHB_SMOKE=1: headless run that auto-quits once the probe result arrives (or after 22 s).
-const PATHB_MODE  = process.env.WA_PATHB       === '1';
-const PATHB_SMOKE = process.env.WA_PATHB_SMOKE === '1' && PATHB_MODE;
-
-// ROUND-TRIP TEST (WA_ROUNDTRIP=1): run hybrid main window (installBridges, ?windows=1)
-// PLUS a plain-web engine window (persist:wa-engine). The engine window auto-initializes
-// the WASM stack (subscribe+voipInit) 4 s after load. When a real incoming-call offer
-// arrives at the hybrid VoipBridge, it is forwarded to the WASM stack over IPC; the
-// Proxy-based subscribe sink in engine-preload.ts captures all outbound callbacks and
-// logs a [roundtrip] VERDICT {emittedSignaling, callbacks, keyCallbacks} line.
-// Optional: WA_ROUNDTRIP_STARTCALL=<peerJid> triggers stack.startCall() after init.
-const ROUNDTRIP_MODE = process.env.WA_ROUNDTRIP === '1';
-
-if (CALL_MODE) {
-  app.setPath('userData', path.join(app.getPath('appData'), 'whatswine-call'));
-  // SharedArrayBuffer safety net for the WASM voip gate. We do NOT force COOP ourselves — WhatsApp
-  // serves the COOP/COEP that makes the page crossOriginIsolated, and forcing it from the shell
-  // severs the call popout's window.opener so the popout renders blank (doc 43 §4).
-  app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
-  // Linux: the Chromium audio-service sandbox often can't reach PulseAudio/PipeWire, so the OS mic
-  // never opens and getUserMedia hands back a silent zeros track instead of failing (electron#23792).
-  app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
-}
-
-if (ENGINE_MODE) {
-  // The hidden engine window needs SAB (WASM voip gate) and audio (mic/camera for media).
-  // Same rationale as CALL_MODE above — the engine window loads plain web with WASM voip.
-  app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
-  app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
-}
-
-if (PATHB_MODE) {
-  // Path B probe window is plain-web with WASM voip — needs SAB and audio, same as CALL_MODE.
-  app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
-  app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
-}
-
-if (ROUNDTRIP_MODE) {
-  // Engine window is plain-web with WASM voip — same SAB + audio requirements.
+if (CALL_MODE || HYBRID_CALLS) {
+  if (CALL_MODE) app.setPath('userData', path.join(app.getPath('appData'), 'whatswine-call'));
+  // The plain-web voip context (CALL_MODE page, or the hidden engine window) needs SharedArrayBuffer
+  // (WASM voip gate) and a working mic. We do NOT force COOP — WhatsApp serves its own COOP/COEP, and
+  // forcing it severs the call popout's window.opener (doc 43 §4). The Linux Chromium audio-service
+  // sandbox blocks the mic (silent getUserMedia, electron#23792), so disable it.
   app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
   app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
 }
@@ -475,42 +438,18 @@ app.on('before-quit', () => { isQuitting = true; });
 app.on('ready', () => {
   // PATH B: skip the hybrid main window entirely; create only the ephemeral probe window.
   // No tray, no bridges — this is a pure investigation tool.
-  if (PATHB_MODE) {
-    if (PATHB_SMOKE) {
-      // Quit as soon as the probe result IPC arrives (1 s grace for trailing logs).
-      // The handler in installEngineIpc() also fires and logs the result — both are fine.
-      ipcMain.once('wa-engine:pathb-result', () => {
-        console.log('[path-b] probe complete — quitting in 1 s');
-        setTimeout(() => { isQuitting = true; app.quit(); }, 1000);
-      });
-      // 22 s hard fallback in case the result never arrives (page failed to load, etc.)
-      setTimeout(() => {
-        console.log('[path-b] SMOKE TIMEOUT (22 s) — forcing quit');
-        isQuitting = true;
-        app.quit();
-      }, 22000);
-    }
-    createPathBWindow();
-    return;
-  }
-
   // Call mode is plain-web, so the native host-object bridges are unused — skip them (doc 43 §6).
   if (!CALL_MODE) installBridges();
   createWindow();
   createTray();
-  // Method 3 spike: create the hidden engine window after the bridges are installed
-  // (voip.ts registers the outbound relay during installBridges() above).
-  if (ENGINE_MODE || ROUNDTRIP_MODE) createEngineWindow();
+  // Hybrid-calls: create the hidden engine window AFTER installBridges() — voip.ts registers the
+  // outbound relay during installBridges(), which the engine window needs before it emits.
+  if (HYBRID_CALLS) createEngineWindow();
 });
 
 // With a tray the app keeps running when the window is hidden; quit only on explicit Quit.
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin' && isQuitting) {
-    app.quit();
-  }
-  // In Path B mode there is no tray — quitting the probe window should exit the process.
-  if (PATHB_MODE) {
-    isQuitting = true;
     app.quit();
   }
 });
