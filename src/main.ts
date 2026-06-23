@@ -1,14 +1,13 @@
-import { app, BrowserWindow, session, shell, Tray, Menu } from 'electron';
+import { app, BrowserWindow, WebContentsView, session, shell, Tray, Menu } from 'electron';
 import path from 'node:path';
 import { writeFileSync } from 'node:fs';
 import started from 'electron-squirrel-startup';
 import { appIcon } from './icon';
 import { installSoundPlayer } from './sound';
-import { installRingtone } from './ringtone';
 import { registerMainWindow, showMainWindow } from './window';
 import { installBridges } from './bridge/registry';
 import { WA_ORIGIN, WA_HOST_ORIGIN, cleanUserAgent } from './waConfig';
-import { createCallWindow } from './callWindow';
+import { createCallView, showCallLayer, hideCallLayer } from './callView';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
@@ -78,17 +77,20 @@ function createTray() {
   tray.setToolTip('WhatsApp');
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: 'Show WhatsApp', click: showWindow },
-      // Calling opens (or focuses) the second plain-web window that runs as a
-      // separate linked device with real WASM-backed calling.
-      { label: 'Calling', click: () => createCallWindow() },
+      // Show WhatsApp must also drop the call layer — otherwise it stays painted
+      // on top and raising the window reveals nothing new.
+      { label: 'Show WhatsApp', click: () => { hideCallLayer(); showWindow(); } },
+      // Calling always shows the plain-web call layer (a separate linked device
+      // with real WASM-backed calling) as a full-window overlay. "Show WhatsApp"
+      // is the way back to chat — clicking Calling while in calling stays put.
+      { label: 'Calling', click: () => showCallLayer() },
       { type: 'separator' },
       { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
     ]),
   );
   tray.on('click', () => {
     if (mainWindow?.isVisible() && mainWindow.isFocused()) mainWindow.hide();
-    else showWindow();
+    else { hideCallLayer(); showWindow(); }
   });
 }
 
@@ -130,6 +132,17 @@ const createWindow = () => {
     minHeight: 600,
     autoHideMenuBar: true,
     icon: appIcon(),
+    backgroundColor: '#111b21',   // WA dark, shown behind the views before first paint
+  });
+
+  registerMainWindow(mainWindow);
+
+  // Single-window layering: the hybrid chat view fills the window as the base
+  // layer; the call view (created warm-but-hidden below) stacks on top and is
+  // shown only during a call. Each view is its own WebContents with its own
+  // session — the hybrid keeps the preload + native bridges; the call layer is
+  // plain web on its own partition.
+  const hybridView = new WebContentsView({
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       // Remote content: keep it walled off from Node/Electron internals. The bridge
@@ -140,13 +153,9 @@ const createWindow = () => {
       sandbox: true,
     },
   });
+  mainWindow.contentView.addChildView(hybridView);
 
-  // Register so showMainWindow() and voip.ts toast clicks always target this window,
-  // not the call window (which is created later and would otherwise be found first in
-  // some Electron window-list orderings).
-  registerMainWindow(mainWindow);
-
-  const wc = mainWindow.webContents;
+  const wc = hybridView.webContents;
 
   // Force-grant persistent storage via CDP, exactly like the Windows client's
   // ForcePersistentStoragePermission (doc 31 §3.3) — belt-and-suspenders with the
@@ -221,7 +230,7 @@ const createWindow = () => {
   // Inject the WhatsApp notification-tone player into the WA page on every load
   // (idempotent self-guard). The native SystemIntegrations.playTone bridge triggers
   // it from the main process (src/sound.ts).
-  wc.on('dom-ready', () => { installSoundPlayer(wc); installRingtone(wc); });
+  wc.on('dom-ready', () => { installSoundPlayer(wc); });
 
   // Close button hides to tray instead of quitting (real quit via tray / before-quit).
   mainWindow.on('close', (e) => {
@@ -238,7 +247,19 @@ const createWindow = () => {
     console.error('[hybrid] did-fail-load:', code, desc, url);
   });
 
-  mainWindow.loadURL(buildUrl(), { userAgent });
+  wc.loadURL(buildUrl(), { userAgent });
+
+  // Stack the warm-but-hidden call layer on top, then keep both views sized to
+  // the window's content area on every resize/maximize.
+  const win = mainWindow;
+  const callView = createCallView(win);
+  const layout = () => {
+    const { width, height } = win.getContentBounds();
+    hybridView.setBounds({ x: 0, y: 0, width, height });
+    callView.setBounds({ x: 0, y: 0, width, height });
+  };
+  layout();
+  win.on('resize', layout);
 
   if (process.env.HYBRID_SMOKE) runHybridSmoke(wc);
   else if (process.env.M0_SMOKE) runWebSmoke(wc);
