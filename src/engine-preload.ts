@@ -97,7 +97,10 @@ contextBridge.executeInMainWorld({
     });
 
     let stack: Stack | null = null;
-    let pendingOffer: unknown[] | null = null;
+    // Anything (voipInit, offers, JID answers) can arrive from the hybrid before the stack is
+    // instantiated (~3s after load). Queue and flush in order on ready — dropping voipInit would
+    // leave the engine uninitialized and offers would fail.
+    const pendingControl: [string, unknown[]][] = [];
 
     const init = () => {
       const rl = getRequireLazy();
@@ -115,13 +118,14 @@ contextBridge.executeInMainWorld({
           catch (e) { p.log('factory failed: ' + String(e)); return; }
         }
         p.ready({ type: stack.type ?? 'unknown', hasOffer: typeof stack.handleIncomingSignalingOffer === 'function' });
-        // If an offer arrived before the stack was ready, replay it.
-        if (pendingOffer) { try { (stack.handleIncomingSignalingOffer as (...a: unknown[]) => void)(...pendingOffer); } catch (e) { p.log('replay offer err ' + String(e)); } pendingOffer = null; }
+        // Flush everything queued before the stack was ready, in arrival order
+        // (voipInit precedes any offer that came after it).
+        for (const [m, a] of pendingControl.splice(0)) call(m, a);
       });
     };
 
     const call = (method: string, args: unknown[]) => {
-      if (!stack) { p.log('control before stack ready: ' + method); return; }
+      if (!stack) { pendingControl.push([method, args]); p.log('queued (stack not ready): ' + method); return; }
       const fn = stack[method];
       if (typeof fn !== 'function') { p.log('control: not a fn: ' + method); return; }
       try { (fn as (...a: unknown[]) => unknown).apply(stack, args); }
@@ -130,9 +134,7 @@ contextBridge.executeInMainWorld({
 
     p.onOffer((pl) => {
       const o = pl as { xmlNodeBase64: string; msgPlatform: string; msgVersion: string; msgE: string; msgT: string; msgOffline: boolean; isOfferNotContact: boolean; peerJid: string };
-      const args = [o.xmlNodeBase64, o.msgPlatform, o.msgVersion, o.msgE, o.msgT, o.msgOffline, o.isOfferNotContact, o.peerJid];
-      if (!stack) { pendingOffer = args; p.log('offer queued (stack not ready)'); return; }
-      call('handleIncomingSignalingOffer', args);
+      call('handleIncomingSignalingOffer', [o.xmlNodeBase64, o.msgPlatform, o.msgVersion, o.msgE, o.msgT, o.msgOffline, o.isOfferNotContact, o.peerJid]);
     });
     p.onSignaling((pl) => { const o = pl as { xmlNodeBase64: string; extraArgs: unknown[] }; call('handleIncomingSignalingMessage', [o.xmlNodeBase64, ...o.extraArgs]); });
     p.onAck((pl) => { const o = pl as { xmlNodeBase64: string; ackInfoError: unknown; ackInfoType: unknown; peerJid: string }; call('handleIncomingSignalingAck', [o.xmlNodeBase64, o.ackInfoError, o.ackInfoType, o.peerJid]); });
