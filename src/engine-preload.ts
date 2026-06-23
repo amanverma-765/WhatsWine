@@ -639,22 +639,22 @@ contextBridge.executeInMainWorld({
 
     // ── Round-trip test (WA_ROUNDTRIP=1) ─────────────────────────────────────
     // Triggered by wa-engine:run-roundtrip IPC ~4 s after page load.
-    // Initializes the WASM stack via the U1a factory path, wires a Proxy-based
-    // subscribe sink that captures ALL IVoipBridgeToWeb callbacks, then calls
-    // voipInit() so the stack is ready to accept real offers from the hybrid window.
     //
-    // When a real incoming-call offer arrives via wa-engine:push-offer (forwarded
-    // from the hybrid VoipSignalingBridge), p.onPushOffer feeds it to rtStack
-    // (the pre-initialized instance) instead of re-loading the module.
+    // Four outbound-channel approaches tried in parallel (doc 43 §2.3):
+    //  A. Patch WAWebVoipSendSignalingXmpp — the module the WASM engine calls
+    //     directly for outbound signaling (primary path, bundle-documented).
+    //  B. Pass capturing-Proxy as factory arg — the native variant wraps its host
+    //     bridge this way; the WASM variant may do the same.
+    //  C. Assign capturing fns to settable own-key callback slots (the 58 ownKeys
+    //     may include null/fn-typed assignable callback properties).
+    //  D. Try known setter method names on the prototype (setCallbacks, setDelegate…)
     //
-    // If the stack emits any outbound signaling (handleSignalingXmpp, handleVoipCall,
-    // etc.) the Proxy sink captures it and sends a [roundtrip] ENGINE-OUTBOUND log +
-    // an IPC event to main. A VERDICT is logged after 30 s (or sooner when signaling
-    // fires).
+    // All four are attempted regardless; OUTBOUND-CHANNEL logs which worked.
+    // VERDICT fires as soon as ANY mechanism captures a signaling emission.
     p.onRunRoundtrip((payload) => {
-      const pl  = payload as { startCallJid?: string | null };
+      const pl = payload as { startCallJid?: string | null };
       const startCallJid: string | null = pl.startCallJid ?? null;
-      const rt  = (tag: string, data: unknown) =>
+      const rt = (tag: string, data: unknown) =>
         console.log('[roundtrip] ' + tag + ' ' + JSON.stringify(data));
 
       rt('INIT-START', { startCallJid });
@@ -662,6 +662,63 @@ contextBridge.executeInMainWorld({
       const rl = getRequireLazy();
       if (!rl) { rt('INIT-FAIL', { why: 'requireLazy absent' }); return; }
 
+      // Verdict — defined early so all approaches below can call sendVerdict.
+      let verdictSent = false;
+      const sendVerdict = () => {
+        if (verdictSent) return;
+        verdictSent = true;
+        const keyCbs = rtFiredCallbacks.filter(n => /key|cipher|ssrc|hkdf|hmac|derive/i.test(n));
+        const emittedSignaling = rtFiredCallbacks.some(n =>
+          /signaling|xmpp|voipCall|voipReady|WAWebVoipSend/i.test(n),
+        );
+        const verdict = { emittedSignaling, callbacks: [...rtFiredCallbacks], keyCallbacks: keyCbs };
+        rt('VERDICT', verdict);
+        p.sendRoundtripVerdict(verdict);
+      };
+
+      // Universal capturing proxy — used as factory delegate arg AND for setter methods.
+      const capProxy = new Proxy({} as Record<string, unknown>, {
+        get: (_t, prop) => (...args: unknown[]) => {
+          const name = String(prop);
+          rtFiredCallbacks.push(name);
+          const argsPreview = JSON.stringify(args).slice(0, 400);
+          rt('ENGINE-OUTBOUND', { method: name, argsPreview });
+          if (/key|cipher|ssrc|hkdf|hmac|derive/i.test(name + argsPreview)) {
+            rt('KEY-CALLBACK', { name, argsPreview });
+          }
+          p.sendRoundtripEvent(name, args);
+          if (/signaling|xmpp|voipCall|voipReady/i.test(name)) {
+            setTimeout(sendVerdict, 2000);
+          }
+        },
+      });
+
+      // ── Approach A: patch WAWebVoipSendSignalingXmpp (doc 43 §2.3) ──────────
+      // The WASM engine calls functions in this module for outbound signaling — it
+      // does NOT call back via subscribe(). Patching here captures every emission.
+      rl(['WAWebVoipSendSignalingXmpp'], (sigMod) => {
+        const sm = sigMod as Record<string, unknown> | null;
+        if (!sm) {
+          rt('APPROACH-A', { ok: false, why: 'WAWebVoipSendSignalingXmpp null' });
+          return;
+        }
+        const allKeys = Object.keys(sm);
+        const fns = allKeys.filter(k => typeof sm[k] === 'function');
+        rt('APPROACH-A', { ok: true, totalKeys: allKeys.length, patchedFns: fns });
+        for (const fnName of fns) {
+          const orig = sm[fnName] as (...a: unknown[]) => unknown;
+          sm[fnName] = (...args: unknown[]) => {
+            const name = 'WAWebVoipSendSignalingXmpp.' + fnName;
+            rtFiredCallbacks.push(name);
+            rt('ENGINE-OUTBOUND', { method: name, argsPreview: JSON.stringify(args).slice(0, 400) });
+            p.sendRoundtripEvent(name, args);
+            setTimeout(sendVerdict, 2000); // any signaling fn = positive signal
+            return orig.apply(sm, args);
+          };
+        }
+      });
+
+      // ── Approach B/C/D: factory arg + surface inspection ────────────────────
       rl(['WAWebVoipStackInterfaceWeb'], (mod) => {
         const m = mod as Record<string, unknown> | null;
         if (!m || typeof m.createWAWebVoipStackInterface !== 'function') {
@@ -669,114 +726,129 @@ contextBridge.executeInMainWorld({
           return;
         }
 
+        // Approach B: factory(capProxy) — mirrors native variant which wraps its host bridge.
         let inst: Record<string, unknown> | null = null;
+        let factoryChannel = 'arg-less';
         try {
-          inst = (m.createWAWebVoipStackInterface as () => unknown)() as Record<string, unknown>;
-        } catch (e1) {
+          inst = (m.createWAWebVoipStackInterface as (d: unknown) => unknown)(capProxy) as Record<string, unknown>;
+          factoryChannel = 'delegate-proxy';
+          rt('APPROACH-B', { ok: true });
+        } catch {
           try {
-            inst = (m.createWAWebVoipStackInterface as (c: unknown) => unknown)({}) as Record<string, unknown>;
+            inst = (m.createWAWebVoipStackInterface as () => unknown)() as Record<string, unknown>;
+            rt('APPROACH-B', { ok: false, note: 'delegate threw; arg-less ok' });
           } catch (e2) {
-            rt('INIT-FAIL', {
-              why: 'factory threw both ways',
-              e1: String((e1 as Error)?.message ?? e1),
-              e2: String((e2 as Error)?.message ?? e2),
-            });
+            rt('INIT-FAIL', { why: 'factory threw both ways', e2: String((e2 as Error)?.message ?? e2) });
             return;
           }
         }
         if (!inst) { rt('INIT-FAIL', { why: 'factory returned null' }); return; }
 
-        const stack = inst; // non-nullable alias for closures
+        const stack = inst;
         rtStack = stack;
-        rt('STACK-OK', { type: stack.type ?? 'unknown' });
+        rt('STACK-OK', { type: stack.type ?? 'unknown', factoryChannel });
 
-        // Verdict state — defined before sink so the sink can trigger early verdict.
-        let verdictSent = false;
-        const sendVerdict = () => {
-          if (verdictSent) return;
-          verdictSent = true;
-          const sigCbs  = ['handleSignalingXmpp', 'handleVoipCall', 'handleVoipReady'];
-          const keyCbs  = rtFiredCallbacks.filter(n => /key|cipher|ssrc|hkdf|hmac|derive/i.test(n));
-          const emittedSignaling = rtFiredCallbacks.some(n => sigCbs.includes(n));
-          const verdict = { emittedSignaling, callbacks: [...rtFiredCallbacks], keyCallbacks: keyCbs };
-          rt('VERDICT', verdict);
-          p.sendRoundtripVerdict(verdict);
-        };
+        // Full surface dump — untruncated (all ownKeys + all proto methods)
+        const ownKeys = Object.getOwnPropertyNames(stack);
+        rt('OWN-KEYS-FULL', { count: ownKeys.length, keys: ownKeys });
 
-        // Proxy sink — intercepts ALL IVoipBridgeToWeb callbacks.
-        // subscribe() will call methods on this object for every outbound engine event.
-        const sink = new Proxy({} as Record<string, unknown>, {
-          get: (_t, prop) => (...args: unknown[]) => {
-            const name = String(prop);
-            rtFiredCallbacks.push(name);
-            const argsPreview = JSON.stringify(args).slice(0, 400);
-            rt('ENGINE-OUTBOUND', { method: name, argsPreview });
-            if (/key|cipher|ssrc|hkdf|hmac|derive/i.test(name + argsPreview)) {
-              rt('KEY-CALLBACK', { name, argsPreview });
+        const protoMethods: { name: string; arity: number | string }[] = [];
+        const protoSeen = new Set<string>();
+        let proto: object | null = stack;
+        while (proto && proto !== Object.prototype) {
+          for (const name of Object.getOwnPropertyNames(proto)) {
+            if (protoSeen.has(name) || name === 'constructor') continue;
+            protoSeen.add(name);
+            try {
+              const desc = Object.getOwnPropertyDescriptor(proto, name);
+              if (desc && typeof desc.value === 'function') {
+                protoMethods.push({ name, arity: (desc.value as { length?: number }).length ?? '?' });
+              }
+            } catch { /* live accessor */ }
+          }
+          proto = Object.getPrototypeOf(proto) as object | null;
+        }
+        rt('PROTO-METHODS-FULL', { count: protoMethods.length, methods: protoMethods });
+
+        // Approach C: settable own-key callback slots.
+        // Assign capturing fn to null/undefined slots + fn-typed slots with callback names.
+        const settable: string[] = [];
+        for (const key of ownKeys) {
+          const val = (stack as Record<string, unknown>)[key];
+          const looksLikeCb = val === null || val === undefined
+            || (typeof val === 'function' && /^(handle|on[A-Z]|request|cb)/i.test(key));
+          if (looksLikeCb) {
+            try {
+              (stack as Record<string, unknown>)[key] = (...args: unknown[]) => {
+                const name = 'slot:' + key;
+                rtFiredCallbacks.push(name);
+                const argsPreview = JSON.stringify(args).slice(0, 400);
+                rt('ENGINE-OUTBOUND', { method: name, argsPreview });
+                p.sendRoundtripEvent(name, args);
+                if (/signaling|xmpp|voip|call|key|cipher/i.test(key)) setTimeout(sendVerdict, 2000);
+              };
+              settable.push(key);
+            } catch { /* read-only */ }
+          }
+        }
+        rt('APPROACH-C', { settable });
+
+        // Approach D: proto setter methods.
+        const SETTER_NAMES = [
+          'setCallbacks', 'setDelegate', 'setEventHandler', 'setObserver',
+          'registerCallbacks', 'on', 'addListener', 'addEventListener', 'setListeners',
+          'setToWebBridge', 'setVoipBridgeToWeb', 'setWebDelegate',
+        ];
+        let setterUsed: string | null = null;
+        for (const method of SETTER_NAMES) {
+          if (typeof (stack as Record<string, unknown>)[method] === 'function') {
+            try {
+              ((stack as Record<string, unknown>)[method] as (d: unknown) => void)(capProxy);
+              setterUsed = method;
+              rt('APPROACH-D', { ok: true, method });
+              break;
+            } catch (e) {
+              rt('APPROACH-D', { ok: false, method, threw: String((e as Error)?.message ?? e) });
             }
-            p.sendRoundtripEvent(name, args);
-            // Early verdict when signaling fires (2 s grace for cascading callbacks)
-            if (name === 'handleSignalingXmpp' || name === 'handleVoipCall') {
-              setTimeout(sendVerdict, 2000);
-            }
-          },
+          }
+        }
+
+        // subscribe() — expected absent on web stack; log for completeness.
+        if (typeof stack.subscribe === 'function') {
+          try { (stack.subscribe as (s: unknown) => void)(capProxy); rt('SUBSCRIBE', { ok: true }); }
+          catch (e) { rt('SUBSCRIBE', { ok: false, error: String((e as Error)?.message ?? e) }); }
+        } else {
+          rt('SUBSCRIBE', { ok: false, why: 'not a fn — expected; web stack uses module-level outbound' });
+        }
+
+        rt('OUTBOUND-CHANNEL', {
+          found: [
+            'A:WAWebVoipSendSignalingXmpp-patch',
+            ...(factoryChannel === 'delegate-proxy' ? ['B:factory-delegate'] : []),
+            ...(settable.length ? ['C:own-slots:' + settable.slice(0, 8).join(',')] : []),
+            ...(setterUsed ? ['D:setter:' + setterUsed] : []),
+          ],
         });
 
-        // subscribe() BEFORE voipInit so the sink is wired before init fires any events.
-        let subscribeOk = false;
-        if (typeof stack.subscribe === 'function') {
-          try {
-            (stack.subscribe as (s: unknown) => void)(sink);
-            subscribeOk = true;
-            rt('SUBSCRIBE', { ok: true, order: 'before-voipInit' });
-          } catch (e) {
-            rt('SUBSCRIBE', { ok: false, error: String((e as Error)?.message ?? e) });
-          }
-        } else {
-          rt('SUBSCRIBE', { ok: false, why: 'subscribe not a fn on stack' });
-        }
-
-        // voipInit(myDeviceJid, myUserJid, selfLidDeviceJid) — doc 41 §3.2
-        // Placeholder JIDs: the WASM engine may demand real values later (key derivation)
-        // but should boot without them (U2 proved voipInit ok:true logged-out).
+        // voipInit(myDeviceJid, myUserJid, selfLidDeviceJid)
         if (typeof stack.voipInit === 'function') {
           try {
-            (stack.voipInit as (...a: unknown[]) => void)(
-              '0:0@lid', '0@s.whatsapp.net', '0:0@lid',
-            );
-            rt('VOIP-INIT', { ok: true, subscribeFirst: subscribeOk });
+            (stack.voipInit as (...a: unknown[]) => void)('0:0@lid', '0@s.whatsapp.net', '0:0@lid');
+            rt('VOIP-INIT', { ok: true });
           } catch (e) {
             rt('VOIP-INIT', { ok: false, error: String((e as Error)?.message ?? e) });
-            // Retry: subscribe-then-voipInit in case order matters
-            if (!subscribeOk && typeof stack.subscribe === 'function') {
-              try {
-                (stack.subscribe as (s: unknown) => void)(sink);
-                (stack.voipInit as (...a: unknown[]) => void)(
-                  '0:0@lid', '0@s.whatsapp.net', '0:0@lid',
-                );
-                rt('VOIP-INIT-RETRY', { ok: true });
-              } catch (e2) {
-                rt('VOIP-INIT-RETRY', { ok: false, error: String((e2 as Error)?.message ?? e2) });
-              }
-            }
           }
         } else {
-          rt('VOIP-INIT', { ok: false, why: 'voipInit not a fn on stack' });
+          rt('VOIP-INIT', { ok: false, why: 'not a fn' });
         }
 
-        // Optional outbound: startCall if WA_ROUNDTRIP_STARTCALL=<peerJid> was set.
-        // Arity-7 minimum (doc 41 §3.9); fill placeholders for the unknown trailing args.
+        // Optional startCall
         if (startCallJid && typeof stack.startCall === 'function') {
           setTimeout(() => {
             try {
               (stack.startCall as (...a: unknown[]) => void)(
-                startCallJid,
-                [startCallJid],                     // deviceJids[]
-                'CAFEBABE00000001CAFEBABE00000001', // fake callId
-                false,                              // useVideo
-                startCallJid,                       // phoneNumberJid
-                false,                              // isLidCall
-                true,                               // isFromDialer
+                startCallJid, [startCallJid], 'CAFEBABE00000001CAFEBABE00000001',
+                false, startCallJid, false, true,
               );
               rt('START-CALL', { called: true, peerJid: startCallJid });
             } catch (e) {
@@ -785,7 +857,6 @@ contextBridge.executeInMainWorld({
           }, 1000);
         }
 
-        // 30 s fallback verdict — fires even if no callbacks were received.
         setTimeout(sendVerdict, 30000);
       });
     }); // end p.onRunRoundtrip
