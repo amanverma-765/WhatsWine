@@ -7,7 +7,7 @@ import { installSoundPlayer } from './sound';
 import { installRingtone } from './ringtone';
 import { showMainWindow } from './window';
 import { installBridges } from './bridge/registry';
-import { createEngineWindow } from './engine-window';
+import { createEngineWindow, setNativeEventRelay } from './engine-window';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
@@ -447,7 +447,12 @@ app.on('ready', () => {
   createTray();
   // Hybrid-calls: create the hidden engine window AFTER installBridges() — voip.ts registers the
   // outbound relay during installBridges(), which the engine window needs before it emits.
-  if (HYBRID_CALLS) createEngineWindow();
+  if (HYBRID_CALLS) {
+    // Replay the engine's native call events into the hybrid bundle so the call UI rings.
+    setNativeEventRelay((eventType, eventDataJson) =>
+      mainWindow?.webContents.send('wa-hybrid:native-call-event', eventType, eventDataJson));
+    createEngineWindow();
+  }
 });
 
 // With a tray the app keeps running when the window is hidden; quit only on explicit Quit.

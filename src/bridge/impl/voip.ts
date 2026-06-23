@@ -313,12 +313,13 @@ function voipSignalingBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactor
     handleIncomingSignalingOffer: (
       xmlNodeBase64: unknown, msgPlatform: unknown, msgVersion: unknown,
       msgE: unknown, msgT: unknown, msgOffline: unknown,
-      isOfferNotContact: unknown, peerJid: unknown,
+      isOfferNotContact: unknown, peerJid: unknown, ...rest: unknown[]
     ) => {
-      ctx.log('[VoipSignalingBridge] handleIncomingSignalingOffer', { peerJid, msgPlatform, msgT });
+      ctx.log('[VoipSignalingBridge] handleIncomingSignalingOffer', { peerJid, msgPlatform, msgT }, rest.length, 'extra args');
       showIncomingCallToast(ctx, String(peerJid ?? ''));
       ring();
-      // Forward to hidden engine window (no-op if WA_ENGINE_MODE not set)
+      // Forward to the hidden engine window. The WASM stack's handleIncomingSignalingOffer takes a
+      // trailing tcToken (9th arg); the hybrid may supply it as the first extra arg.
       pushOfferToEngine({
         xmlNodeBase64: String(xmlNodeBase64 ?? ''),
         msgPlatform:   String(msgPlatform ?? ''),
@@ -328,6 +329,7 @@ function voipSignalingBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactor
         msgOffline:    Boolean(msgOffline),
         isOfferNotContact: Boolean(isOfferNotContact),
         peerJid:       String(peerJid ?? ''),
+        tcToken:       rest[0],
       });
     },
 

@@ -22,6 +22,7 @@ const ENGINE_PARTITION = 'wa-engine';
 export interface EngineOfferPayload {
   xmlNodeBase64: string; msgPlatform: string; msgVersion: string; msgE: string;
   msgT: string; msgOffline: boolean; isOfferNotContact: boolean; peerJid: string;
+  tcToken?: unknown;
 }
 export interface EngineSignalingPayload { xmlNodeBase64: string; extraArgs: unknown[]; }
 export interface EngineAckPayload { xmlNodeBase64: string; ackInfoError: unknown; ackInfoType: unknown; peerJid: string; }
@@ -32,6 +33,11 @@ let ipcInstalled = false;
 // Relay registered by voip.ts: engine outbound → hybrid sharedTw ToWeb bus.
 let outboundRelay: ((method: string, args: unknown[]) => void) | null = null;
 export function setOutboundRelay(fn: (method: string, args: unknown[]) => void): void { outboundRelay = fn; }
+
+// Relay registered by main.ts: engine native call events → hybrid window, replayed there via
+// WAWebVoipHandleNativeCallEvent so the call UI rings.
+let nativeEventRelay: ((eventType: unknown, eventDataJson: unknown) => void) | null = null;
+export function setNativeEventRelay(fn: (eventType: unknown, eventDataJson: unknown) => void): void { nativeEventRelay = fn; }
 
 function engineSend(channel: string, ...payload: unknown[]): void {
   if (engineWindow && !engineWindow.isDestroyed()) engineWindow.webContents.send(channel, ...payload);
@@ -151,5 +157,12 @@ function installEngineIpc(): void {
     if (process.env.WA_BRIDGE_DEBUG) console.log('[engine] out:', method, JSON.stringify(args).slice(0, 300));
     if (outboundRelay) outboundRelay(method, args);
     else console.warn('[engine] engine-out before relay registered:', method);
+  });
+
+  // Engine → hybrid: relay native call events (onCallEvent) to replay in the hybrid UI.
+  ipcMain.on('wa-engine:native-call-event', (_e, eventType: unknown, eventDataJson: unknown) => {
+    if (process.env.WA_BRIDGE_DEBUG) console.log('[engine] native-call-event:', eventType, String(eventDataJson).slice(0, 200));
+    if (nativeEventRelay) nativeEventRelay(eventType, eventDataJson);
+    else console.warn('[engine] native-call-event before relay registered:', eventType);
   });
 }

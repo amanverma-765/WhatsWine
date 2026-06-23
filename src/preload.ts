@@ -15,11 +15,16 @@ import { contextBridge, ipcRenderer } from 'electron';
 // deferred resolution of promise-returning sync methods.
 let toWebHandler: ((id: number, method: string | null, args: unknown[]) => void) | null = null;
 let resolveHandler: ((id: number, ok: boolean, payload: unknown) => void) | null = null;
+let nativeCallEventHandler: ((eventType: unknown, eventDataJson: unknown) => void) | null = null;
 ipcRenderer.on('wa-bridge:toweb', (_e, id: number, method: string | null, args: unknown[]) => {
   toWebHandler?.(id, method, args);
 });
 ipcRenderer.on('wa-bridge:resolve', (_e, id: number, ok: boolean, payload: unknown) => {
   resolveHandler?.(id, ok, payload);
+});
+// Native call events relayed from the hidden voip engine window (via main) → replay into the bundle.
+ipcRenderer.on('wa-hybrid:native-call-event', (_e, eventType: unknown, eventDataJson: unknown) => {
+  nativeCallEventHandler?.(eventType, eventDataJson);
 });
 
 const prim = {
@@ -27,6 +32,7 @@ const prim = {
   invoke: (name: string, method: string, args: unknown[]) => ipcRenderer.invoke('wa-bridge:async', name, method, args),
   onToWeb: (h: (id: number, method: string | null, args: unknown[]) => void) => { toWebHandler = h; },
   onResolve: (h: (id: number, ok: boolean, payload: unknown) => void) => { resolveHandler = h; },
+  onNativeCallEvent: (h: (eventType: unknown, eventDataJson: unknown) => void) => { nativeCallEventHandler = h; },
 };
 
 contextBridge.exposeInMainWorld('__waBridge', prim);
@@ -100,10 +106,33 @@ contextBridge.executeInMainWorld({
       },
     });
 
-    const w = window as unknown as { chrome?: { webview?: Record<string, unknown> } };
+    const w = window as unknown as { chrome?: { webview?: Record<string, unknown> }; requireLazy?: (mods: string[], cb: (...m: unknown[]) => void) => void };
     w.chrome = w.chrome || {};
     w.chrome.webview = w.chrome.webview || {};
     w.chrome.webview.hostObjects = hostObjects;
+
+    // ── Native call-event replay ──────────────────────────────────────────────
+    // The hidden voip engine window emits onCallEvent {eventType, eventDataJson}; main relays them
+    // here. Replay through the bundle's own dispatcher so the `?windows=1` call UI rings — the same
+    // entry the native voip path drives (analysis/docs/98). Queue until requireLazy + modules load.
+    type CallEventModules = { H: { handleWAWebVoipNativeCallEvent: (t: unknown, json: unknown) => unknown }; E: { CallEvent: { cast: (t: unknown) => unknown } } };
+    const pendingEvents: [unknown, unknown][] = [];
+    let eventModules: CallEventModules | null = null;
+    const dispatchCallEvent = (eventType: unknown, eventDataJson: unknown) => {
+      if (!eventModules) { pendingEvents.push([eventType, eventDataJson]); return; }
+      try { eventModules.H.handleWAWebVoipNativeCallEvent(eventModules.E.CallEvent.cast(eventType), eventDataJson); }
+      catch { /* swallow — bundle may not be in a state to handle it */ }
+    };
+    const loadCallEventModules = (tries = 0) => {
+      const rl = w.requireLazy;
+      if (!rl) { if (tries < 60) setTimeout(() => loadCallEventModules(tries + 1), 500); return; }
+      rl(['WAWebVoipHandleNativeCallEvent', 'WAWebVoipWaCallEnums'], (H, E) => {
+        eventModules = { H: H as CallEventModules['H'], E: E as CallEventModules['E'] };
+        for (const [t, j] of pendingEvents.splice(0)) dispatchCallEvent(t, j);
+      });
+    };
+    p.onNativeCallEvent(dispatchCallEvent);
+    loadCallEventModules();
 
     // Legacy comma-IPC shim (bridgeError=1, doc 31 §5.2) — no-throw; modern bundle
     // uses hostObjects. ponytail: native->JS legacy events unused.
