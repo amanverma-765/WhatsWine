@@ -134,14 +134,54 @@ contextBridge.executeInMainWorld({
 
     type RL = (mods: string[], cb: (m: unknown) => void) => void;
 
+    // Walk the prototype chain to list a class instance's method names (class stacks keep
+    // their methods on the prototype, so Object.keys(stack) is empty).
+    const methodNames = (obj: unknown): string[] => {
+      const out = new Set<string>();
+      let o = obj as object | null;
+      while (o && o !== Object.prototype) {
+        for (const k of Object.getOwnPropertyNames(o)) { try { if (typeof (obj as Record<string, unknown>)[k] === 'function') out.add(k); } catch { /* getter threw */ } }
+        o = Object.getPrototypeOf(o);
+      }
+      return [...out];
+    };
+
+    const finishInstantiate = () => {
+      if (!stack) return;
+      p.log('stack methods: ' + JSON.stringify(methodNames(stack).slice(0, 60)));
+      p.ready({ type: stack.type ?? 'unknown', hasOffer: typeof stack.handleIncomingSignalingOffer === 'function' });
+      for (const [mm, a] of pendingControl.splice(0)) call(mm, a);
+    };
+
+    // The bundle no longer resolves WAWebVoipStackInterfaceWeb directly; load via the dispatcher
+    // (WAWebVoipStackInterface.getVoipStackInterface), the supported entry point, which pulls the
+    // concrete Web impl with the bundle's own gating. getVoipStackInterface may return the stack
+    // directly or a promise, and may or may not accept the delegate — handle all shapes.
     const instantiate = (mod: unknown) => {
       const m = mod as Record<string, unknown> | null;
-      if (!m || typeof m.createWAWebVoipStackInterface !== 'function') { p.log('voip module loaded but factory missing'); return; }
-      try { stack = (m.createWAWebVoipStackInterface as (d: unknown) => unknown)(delegate) as Stack; }
-      catch { try { stack = (m.createWAWebVoipStackInterface as () => unknown)() as Stack; } catch (e) { p.log('factory failed: ' + String(e)); return; } }
-      p.ready({ type: stack.type ?? 'unknown', hasOffer: typeof stack.handleIncomingSignalingOffer === 'function' });
-      // Flush everything queued before the stack was ready, in arrival order.
-      for (const [mm, a] of pendingControl.splice(0)) call(mm, a);
+      if (!m) { p.log('voip module loaded but null'); return; }
+
+      // Path 1 — concrete factory (older bundles).
+      if (typeof m.createWAWebVoipStackInterface === 'function') {
+        try { stack = (m.createWAWebVoipStackInterface as (d: unknown) => unknown)(delegate) as Stack; }
+        catch { try { stack = (m.createWAWebVoipStackInterface as () => unknown)() as Stack; } catch (e) { p.log('factory failed: ' + String(e)); return; } }
+        finishInstantiate();
+        return;
+      }
+
+      // Path 2 — dispatcher (current bundle).
+      if (typeof m.getVoipStackInterface === 'function') {
+        let r: unknown;
+        try { r = (m.getVoipStackInterface as (d?: unknown) => unknown)(delegate); }
+        catch { try { r = (m.getVoipStackInterface as () => unknown)(); } catch (e) { p.log('getVoipStackInterface failed: ' + String(e)); return; } }
+        if (r && typeof (r as { then?: unknown }).then === 'function') {
+          (r as Promise<unknown>).then((s) => { stack = s as Stack; p.log('dispatcher stack resolved (async)'); finishInstantiate(); })
+            .catch((e) => p.log('dispatcher promise rejected: ' + String(e)));
+        } else { stack = r as Stack; finishInstantiate(); }
+        return;
+      }
+
+      p.log('voip module loaded but no factory/dispatcher; keys=' + JSON.stringify(Object.keys(m)));
     };
 
     // Force web-calling AB props ON so the voip download gate (isVoipDownloadEnabled) is true —
@@ -167,17 +207,22 @@ contextBridge.executeInMainWorld({
 
     // Retry the voip-module load: the first requireLazy can hang if the download gate hasn't flipped
     // yet, and it never retries itself — re-issue until it resolves (~50s budget).
+    // The dispatcher (WAWebVoipStackInterface) is what resolves in the current bundle; the concrete
+    // *Web name no longer does. Race both — instantiate from whichever fires first.
+    const VOIP_MODULES = ['WAWebVoipStackInterface', 'WAWebVoipStackInterfaceWeb'];
     let voipLoaded = false;
     let voipTries = 0;
     const loadVoip = (rl: RL) => {
       if (voipLoaded) return;
       if (++voipTries > 10) { p.log('voip module never loaded after 10 tries (~50s)'); readGating(rl); return; }
-      rl(['WAWebVoipStackInterfaceWeb'], (mod) => {
-        if (voipLoaded) return;
-        voipLoaded = true;
-        p.log('WAWebVoipStackInterfaceWeb loaded (try ' + voipTries + ')');
-        instantiate(mod);
-      });
+      for (const name of VOIP_MODULES) {
+        rl([name], (mod) => {
+          if (voipLoaded) return;
+          voipLoaded = true;
+          p.log(name + ' loaded (try ' + voipTries + ')');
+          instantiate(mod);
+        });
+      }
       setTimeout(() => { if (!voipLoaded) loadVoip(rl); }, 5000);
     };
 
