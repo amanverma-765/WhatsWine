@@ -158,6 +158,18 @@ contextBridge.executeInMainWorld({
         };
         console.log('[wabridge] hybrid handleWAWebVoipNativeCallEvent hooked');
       });
+      // Also tap frontendFireAndForget to see whether Y reaches setCallState and with what callInfo
+      // (this is what actually drives the ring). Filter to call-related messages.
+      rl(['WAWebBackendApi'], (B) => {
+        const api = B as Record<string, unknown> | null;
+        const orig = api?.frontendFireAndForget as ((n: string, p: unknown) => unknown) | undefined;
+        if (!api || typeof orig !== 'function') return;
+        api.frontendFireAndForget = (name: string, payload: unknown) => {
+          if (/call/i.test(name)) console.log('[wabridge] FFAF ' + name + ' ' + JSON.stringify(payload).slice(0, 300));
+          return orig.call(api, name, payload);
+        };
+        console.log('[wabridge] frontendFireAndForget hooked');
+      });
     };
     hookHybridDispatch();
 
