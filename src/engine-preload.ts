@@ -181,6 +181,24 @@ contextBridge.executeInMainWorld({
       setTimeout(() => { if (!voipLoaded) loadVoip(rl); }, 5000);
     };
 
+    // One-shot diagnostic: which voip module-resolution paths actually resolve in THIS session?
+    // pathb-smoke loaded via U1a(WAWebVoipStackInterfaceWeb); the dispatcher (WAWebVoipStackInterface)
+    // and the raw cr:22885 alias are alternates. Tells us if a name other than *Web works here.
+    const probeAltPaths = (rl: RL) => {
+      let firedWeb = false, firedDisp = false;
+      rl(['WAWebVoipStackInterfaceWeb'], (m) => { firedWeb = true; p.log('ALT WAWebVoipStackInterfaceWeb resolved keys=' + JSON.stringify(Object.keys((m as object) ?? {}))); });
+      rl(['WAWebVoipStackInterface'], (m) => {
+        firedDisp = true;
+        const d = m as Record<string, unknown> | null;
+        p.log('ALT WAWebVoipStackInterface(dispatcher) resolved keys=' + JSON.stringify(Object.keys(d ?? {})) + ' hasGet=' + (typeof d?.getVoipStackInterface));
+      });
+      try {
+        const req = (window as unknown as { require?: (id: string) => unknown }).require;
+        p.log('ALT cr:22885 sync require=' + (req ? typeof req('cr:22885') : 'no window.require'));
+      } catch (e) { p.log('ALT cr:22885 threw: ' + String(e)); }
+      setTimeout(() => p.log('ALT result: Web=' + firedWeb + ' dispatcher=' + firedDisp), 8000);
+    };
+
     const init = () => {
       const rl = getRequireLazy();
       if (!rl) { if (++initTries % 5 === 0) p.log('waiting for requireLazy... ' + initTries + 's'); setTimeout(init, 1000); return; }
@@ -188,7 +206,7 @@ contextBridge.executeInMainWorld({
       p.log('requireLazy ready; coI=' + String(w.crossOriginIsolated) + ' SAB=' + (typeof SharedArrayBuffer));
       patchOutboundSignaling(rl);
       forceCalling(rl);
-      setTimeout(() => { readGating(rl); loadVoip(rl); }, 1200);   // read gating, then load (force settled)
+      setTimeout(() => { readGating(rl); probeAltPaths(rl); loadVoip(rl); }, 1200);   // read gating, probe paths, then load
     };
 
     const call = (method: string, args: unknown[]) => {

@@ -436,8 +436,11 @@ function runWebSmoke(wc: Electron.WebContents) {
 app.on('before-quit', () => { isQuitting = true; });
 
 app.on('ready', () => {
-  // PATH B: skip the hybrid main window entirely; create only the ephemeral probe window.
-  // No tray, no bridges — this is a pure investigation tool.
+  // WA_ENGINE_ONLY=1: diagnostic — create ONLY the logged-out engine window, no hybrid window.
+  // Isolates whether the voip-module load failure is caused by two web.whatsapp.com windows
+  // running together vs. the engine alone (which loaded the module fine in the single-window smoke).
+  if (process.env.WA_ENGINE_ONLY === '1') { createEngineWindow(); return; }
+
   // Call mode is plain-web, so the native host-object bridges are unused — skip them (doc 43 §6).
   if (!CALL_MODE) installBridges();
   createWindow();
