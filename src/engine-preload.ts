@@ -150,7 +150,14 @@ contextBridge.executeInMainWorld({
       if (!stack) return;
       p.log('stack methods: ' + JSON.stringify(methodNames(stack).slice(0, 60)));
       p.ready({ type: stack.type ?? 'unknown', hasOffer: typeof stack.handleIncomingSignalingOffer === 'function' });
-      for (const [mm, a] of pendingControl.splice(0)) call(mm, a);
+      // The engine owns its own init: call voipInit() with NO args (proven in the spike). The hybrid
+      // also forwards voipInit, but its args carry native callback interfaces that IPC serialization
+      // strips → the stack throws "e.node is not a function". The delegate is already wired via
+      // getVoipStackInterface(delegate), so a bare voipInit() is all that's needed.
+      try { (stack.voipInit as (() => unknown) | undefined)?.(); p.log('voipInit() called (no args)'); }
+      catch (e) { p.log('voipInit threw: ' + String(e)); }
+      // Flush everything queued before ready, dropping the hybrid's broken voipInit.
+      for (const [mm, a] of pendingControl.splice(0)) { if (mm === 'voipInit') continue; call(mm, a); }
     };
 
     // The bundle no longer resolves WAWebVoipStackInterfaceWeb directly; load via the dispatcher
@@ -255,6 +262,9 @@ contextBridge.executeInMainWorld({
     };
 
     const call = (method: string, args: unknown[]) => {
+      // The engine self-inits in finishInstantiate; ignore the hybrid's forwarded voipInit (its
+      // native-callback args don't survive IPC and crash the stack).
+      if (method === 'voipInit') { p.log('ignoring forwarded voipInit (engine self-inits)'); return; }
       if (!stack) { pendingControl.push([method, args]); p.log('queued (stack not ready): ' + method); return; }
       const fn = stack[method];
       if (typeof fn !== 'function') { p.log('control: not a fn: ' + method); return; }
