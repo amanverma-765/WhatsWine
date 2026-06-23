@@ -155,6 +155,7 @@ contextBridge.executeInMainWorld({
     };
 
     let stack: Stack | null = null;
+    let voipInited = false;
     let initTries = 0;
     // Anything (offers, JID answers) can arrive before the stack is ready. Queue and flush on ready.
     const pendingControl: [string, unknown[]][] = [];
@@ -216,11 +217,11 @@ contextBridge.executeInMainWorld({
       if (!stack) return;
       p.log('stack methods: ' + JSON.stringify(methodNames(stack).slice(0, 60)));
       p.ready({ type: stack.type ?? 'unknown', hasOffer: typeof stack.handleIncomingSignalingOffer === 'function' });
-      // The engine owns its own init: voipInit() with NO args (proven). The hybrid's forwarded voipInit
-      // is ignored (its native-callback args don't survive IPC).
-      try { (stack.voipInit as (() => unknown) | undefined)?.(); p.log('voipInit() called (no args)'); }
-      catch (e) { p.log('voipInit threw: ' + String(e)); }
-      for (const [mm, a] of pendingControl.splice(0)) { if (mm === 'voipInit') continue; call(mm, a); }
+      // Flush queued control in order. The hybrid forwards voipInit(myDeviceJid,myUserJid,selfLidDeviceJid)
+      // — the real identity strings the engine needs to BUILD accept stanzas (a logged-out engine has no
+      // self JID otherwise, so acceptCall emits nothing). Use it; fall back to no-args only if none came.
+      for (const [mm, a] of pendingControl.splice(0)) call(mm, a);
+      if (!voipInited) { try { (stack.voipInit as (() => unknown) | undefined)?.(); voipInited = true; p.log('voipInit() self-init (no forwarded identity)'); } catch (e) { p.log('voipInit threw: ' + String(e)); } }
     };
 
     // Instantiate via the dispatcher singleton. createWAWebVoipStackInterface takes no delegate; the
@@ -290,9 +291,8 @@ contextBridge.executeInMainWorld({
     };
 
     const call = (method: string, args: unknown[]) => {
-      // The engine self-inits in finishInstantiate; ignore the hybrid's forwarded voipInit.
-      if (method === 'voipInit') { p.log('ignoring forwarded voipInit (engine self-inits)'); return; }
       if (!stack) { pendingControl.push([method, args]); p.log('queued (stack not ready): ' + method); return; }
+      if (method === 'voipInit') { if (voipInited) { p.log('voipInit already done, skipping dup'); return; } voipInited = true; p.log('voipInit with identity args=' + args.length); }
       const fn = stack[method];
       if (typeof fn !== 'function') { p.log('control: not a fn: ' + method); return; }
       try { (fn as (...a: unknown[]) => unknown).apply(stack, args); p.log('control ' + method + ' applied'); }
