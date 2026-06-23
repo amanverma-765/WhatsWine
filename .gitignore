@@ -93,3 +93,6 @@ out/
 
 # OMC tooling state
 .omc/
+
+# Serena tooling state
+.serena/
