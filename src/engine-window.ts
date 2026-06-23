@@ -94,20 +94,29 @@ export function createEngineWindow(): void {
 
   engineWindow = new BrowserWindow({
     width: 900, height: 700,
-    show: !!process.env.WA_ENGINE_SHOW,   // hidden by default; reveal only for debugging
+    show: false,
     skipTaskbar: true,
     title: 'WhatsWine call engine',
     webPreferences: {
       preload: path.join(__dirname, 'engine-preload.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: true,
       partition: ENGINE_PARTITION,
-      // CRITICAL: a hidden window is otherwise background-throttled by Chromium — timers/rAF
-      // freeze and the WA bundle never boots its WASM voip stack. Keep it running at full speed.
       backgroundThrottling: false,
     },
   });
 
+  // A never-shown window has no rendering surface — Chromium rejects its WidgetHost and the WA
+  // SPA stalls before booting the voip stack. Give it a real surface by showing it OFF-SCREEN so
+  // it renders + boots media while staying invisible. WA_ENGINE_SHOW puts it on-screen to debug.
+  if (process.env.WA_ENGINE_SHOW) {
+    engineWindow.show();
+  } else {
+    engineWindow.setPosition(-10000, -10000);
+    engineWindow.showInactive();
+  }
+
   const wc = engineWindow.webContents;
+  wc.on('did-finish-load', () => console.log('[engine] page loaded:', wc.getURL()));
 
   // WA checks navigator.storage.persist() at boot even in an ephemeral session.
   try {
