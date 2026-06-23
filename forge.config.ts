@@ -60,6 +60,13 @@ const config: ForgeConfig = {
           config: 'vite.preload.config.ts',
           target: 'preload',
         },
+        {
+          // Engine preload: loaded only by the hidden engine window (Method 3 spike).
+          // Outputs to .vite/build/engine-preload.js (referenced in engine-window.ts).
+          entry: 'src/engine-preload.ts',
+          config: 'vite.preload.config.ts',
+          target: 'preload',
+        },
       ],
       // No local renderer: the window loads the remote WhatsApp Web bundle
       // (src/main.ts -> loadURL), so there is no app-owned HTML/renderer to build.

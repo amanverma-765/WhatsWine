@@ -7,6 +7,7 @@ import { installSoundPlayer } from './sound';
 import { installRingtone } from './ringtone';
 import { showMainWindow } from './window';
 import { installBridges } from './bridge/registry';
+import { createEngineWindow } from './engine-window';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
@@ -41,6 +42,12 @@ const WEBVIEW2_VERSION = '120.0.2210.144';
 // runs from its own profile (effectively a separate linked device).
 const CALL_MODE = process.env.WA_CALL_MODE === '1';
 
+// ENGINE MODE (WA_ENGINE_MODE=1): Method 3 spike — run the hybrid main window (windows=1, native
+// bridges) PLUS a hidden plain-web BrowserWindow (persist:wa-engine) that hosts the WASM voip
+// stack. Signaling from the hybrid window is forwarded to the hidden engine and vice-versa.
+// Incompatible with CALL_MODE (both are mutually exclusive). See src/engine-window.ts + NOTES.md.
+const ENGINE_MODE = process.env.WA_ENGINE_MODE === '1' && !CALL_MODE;
+
 if (CALL_MODE) {
   app.setPath('userData', path.join(app.getPath('appData'), 'whatswine-call'));
   // SharedArrayBuffer safety net for the WASM voip gate. We do NOT force COOP ourselves — WhatsApp
@@ -49,6 +56,13 @@ if (CALL_MODE) {
   app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
   // Linux: the Chromium audio-service sandbox often can't reach PulseAudio/PipeWire, so the OS mic
   // never opens and getUserMedia hands back a silent zeros track instead of failing (electron#23792).
+  app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
+}
+
+if (ENGINE_MODE) {
+  // The hidden engine window needs SAB (WASM voip gate) and audio (mic/camera for media).
+  // Same rationale as CALL_MODE above — the engine window loads plain web with WASM voip.
+  app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
   app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
 }
 
@@ -109,6 +123,52 @@ const CALL_SHIMS_JS = `(() => {
 
 function installCallShims(target: Electron.WebContents): void {
   target.on('dom-ready', () => { target.executeJavaScript(CALL_SHIMS_JS).catch(() => undefined); });
+}
+
+// WA_VOIP_PROBE=1: inject into the HYBRID window to confirm WAWebVoipStackInterfaceWeb
+// is NOT loadable under ?windows=1 (proving the WASM-in-hybrid impossibility that
+// motivates the two-window architecture). Results appear in WA_BRIDGE_DEBUG console.
+// Tries require, requireLazy, and JSResourceForInteraction.
+const WA_VOIP_PROBE_JS = `(() => {
+  if (window.__waVoipProbe) return;
+  window.__waVoipProbe = true;
+  const log = (r) => console.log('[wa-voip-probe] ' + JSON.stringify(r));
+  // 1. Synchronous require
+  try {
+    const m = window.require && window.require('WAWebVoipStackInterfaceWeb');
+    log({ method: 'require', ok: !!m, keys: m ? Object.keys(m).slice(0, 10) : null });
+  } catch (e) { log({ method: 'require', ok: false, error: String(e && e.message || e) }); }
+  // 2. requireLazy (async module registry)
+  try {
+    const req = window.requireLazy;
+    if (req) {
+      req(['WAWebVoipStackInterfaceWeb'], (m) => {
+        log({ method: 'requireLazy', ok: !!m, keys: m ? Object.keys(m).slice(0, 10) : null });
+      });
+    } else {
+      log({ method: 'requireLazy', ok: false, error: 'not on window' });
+    }
+  } catch (e) { log({ method: 'requireLazy', ok: false, error: String(e && e.message || e) }); }
+  // 3. JSResourceForInteraction (dynamic import shim in some WA bundles)
+  try {
+    const jsr = window.JSResourceForInteraction;
+    if (jsr) {
+      jsr('WAWebVoipStackInterfaceWeb')
+        .then((m) => log({ method: 'JSResourceForInteraction', ok: !!m, keys: m ? Object.keys(m).slice(0, 10) : null }))
+        .catch((e) => log({ method: 'JSResourceForInteraction', ok: false, error: String(e && e.message || e) }));
+    } else {
+      log({ method: 'JSResourceForInteraction', ok: false, error: 'not on window' });
+    }
+  } catch (e) { log({ method: 'JSResourceForInteraction', ok: false, error: String(e && e.message || e) }); }
+})()`;
+
+function installVoipProbe(target: Electron.WebContents): void {
+  // Delay slightly — the WA module registry (requireLazy) initialises after DOMContentLoaded.
+  target.on('dom-ready', () => {
+    setTimeout(() => {
+      target.executeJavaScript(WA_VOIP_PROBE_JS).catch(() => undefined);
+    }, 3000);
+  });
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -289,6 +349,10 @@ const createWindow = () => {
   // it from the main process (src/sound.ts).
   wc.on('dom-ready', () => { installSoundPlayer(wc); installRingtone(wc); });
 
+  // WA_VOIP_PROBE: confirm WAWebVoipStackInterfaceWeb is NOT loadable under ?windows=1.
+  // Results appear as [wa-voip-probe] lines in the console (also visible with WA_BRIDGE_DEBUG).
+  if (process.env.WA_VOIP_PROBE) installVoipProbe(wc);
+
   if (CALL_MODE) {
     installCallShims(wc);
     wc.on('did-create-window', (win) => {
@@ -383,6 +447,9 @@ app.on('ready', () => {
   if (!CALL_MODE) installBridges();
   createWindow();
   createTray();
+  // Method 3 spike: create the hidden engine window after the bridges are installed
+  // (voip.ts registers the outbound relay during installBridges() above).
+  if (ENGINE_MODE) createEngineWindow();
 });
 
 // With a tray the app keeps running when the window is hidden; quit only on explicit Quit.

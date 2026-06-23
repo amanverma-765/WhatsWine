@@ -27,6 +27,12 @@ import { toWeb } from '../eventtarget';
 import { appIcon } from '../../icon';
 import { startRingtone, stopRingtone } from '../../ringtone';
 import { showMainWindow } from '../../window';
+import {
+  setOutboundRelay,
+  pushOfferToEngine,
+  pushSignalingToEngine,
+  pushAckToEngine,
+} from '../../engine-window';
 
 // ─── Ringtone control ────────────────────────────────────────────────────────
 // The bundle's WebRTC stack stays silent here (engine stubbed), so we loop the
@@ -119,6 +125,12 @@ if (process.env.WA_VOIP_SELFCHECK) {
 // either factory can fire callbacks through the same sink set.
 // subscribe() is only exposed on VoipBridge (per IVoipBridgeToNative).
 const sharedTw = toWeb();
+
+// Method 3 spike: register the outbound relay so any signaling the engine window
+// emits (intercepted in engine-preload.ts) is forwarded back to the hybrid page's
+// subscribe sink as if it came from a native engine. No-op when the engine window
+// is not created (WA_ENGINE_MODE not set).
+setOutboundRelay((method, args) => sharedTw.call(method, ...args));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VoipBridge
@@ -289,31 +301,53 @@ function voipSignalingBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactor
 
     // HandleIncomingSignalingOffer — inbound call offer (base64-WAP node, §3.4).
     // In the Windows build: DecodeBase64Wap → IVoip.OnIncomingSignalOffer.
+    // Method 3 spike: also forwarded to the engine window (if WA_ENGINE_MODE=1)
+    // where the WASM stack processes it and drives media. See engine-window.ts.
     // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     handleIncomingSignalingOffer: (
-      _xmlNodeBase64: unknown, msgPlatform: unknown, _msgVersion: unknown,
-      _msgE: unknown, msgT: unknown, _msgOffline: unknown,
-      _isOfferNotContact: unknown, peerJid: unknown,
+      xmlNodeBase64: unknown, msgPlatform: unknown, msgVersion: unknown,
+      msgE: unknown, msgT: unknown, msgOffline: unknown,
+      isOfferNotContact: unknown, peerJid: unknown,
     ) => {
-      ctx.log('[VoipSignalingBridge] handleIncomingSignalingOffer (stub)', { peerJid, msgPlatform, msgT });
+      ctx.log('[VoipSignalingBridge] handleIncomingSignalingOffer', { peerJid, msgPlatform, msgT });
       showIncomingCallToast(ctx, String(peerJid ?? ''));
       ring();
+      // Forward to hidden engine window (no-op if WA_ENGINE_MODE not set)
+      pushOfferToEngine({
+        xmlNodeBase64: String(xmlNodeBase64 ?? ''),
+        msgPlatform:   String(msgPlatform ?? ''),
+        msgVersion:    String(msgVersion ?? ''),
+        msgE:          String(msgE ?? ''),
+        msgT:          String(msgT ?? ''),
+        msgOffline:    Boolean(msgOffline),
+        isOfferNotContact: Boolean(isOfferNotContact),
+        peerJid:       String(peerJid ?? ''),
+      });
     },
 
     // HandleIncomingSignalingMessage — mid-call signaling (rekey, update, etc.).
+    // Method 3 spike: forwarded to engine window so the WASM stack can process it.
     // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
-    handleIncomingSignalingMessage: (_xmlNodeBase64: unknown, ...rest: unknown[]) => {
-      ctx.log('[VoipSignalingBridge] handleIncomingSignalingMessage (stub)', rest.length, 'args');
+    handleIncomingSignalingMessage: (xmlNodeBase64: unknown, ...rest: unknown[]) => {
+      ctx.log('[VoipSignalingBridge] handleIncomingSignalingMessage', rest.length, 'args');
+      pushSignalingToEngine({ xmlNodeBase64: String(xmlNodeBase64 ?? ''), extraArgs: rest });
     },
 
     // HandleIncomingSignalingAck — accept/nack of the call offer (VoipWebCore.cs:60-152).
     // VoipNativeAckInfo {error, type} — e.g. NackGroupCallMaximumLimit (§3.8).
+    // Method 3 spike: forwarded to engine window.
     // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     handleIncomingSignalingAck: (
-      _xmlNodeBase64: unknown, ackInfoError: unknown, ackInfoType: unknown,
+      xmlNodeBase64: unknown, ackInfoError: unknown, ackInfoType: unknown,
       peerJid: unknown,
     ) => {
-      ctx.log('[VoipSignalingBridge] handleIncomingSignalingAck (stub)', { ackInfoError, ackInfoType, peerJid });
+      ctx.log('[VoipSignalingBridge] handleIncomingSignalingAck', { ackInfoError, ackInfoType, peerJid });
+      pushAckToEngine({
+        xmlNodeBase64: String(xmlNodeBase64 ?? ''),
+        ackInfoError,
+        ackInfoType,
+        peerJid: String(peerJid ?? ''),
+      });
     },
 
     // HandleIncomingSignalingReceipt — delivery receipt for a signaling node.
