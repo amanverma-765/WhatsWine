@@ -1,87 +1,35 @@
-// Engine window: a HIDDEN, LOGGED-OUT plain-web BrowserWindow that hosts WhatsApp's
-// WASM voip stack as a headless media/FSM core, bridged to the hybrid window's
-// VoipBridge. The spike proved the stack loads + voipInits + drives a real offer
-// while logged-out, so this window needs no QR pairing and no UI.
+// Call window (dual-window approach — see analysis/docs/99). A SEPARATE, VISIBLE plain-web
+// WhatsApp window that is its OWN logged-in web device (own QR, scanned once; login persists).
+// A real web-identity session = the server ships the web voip bundle, so calls work in WhatsApp's
+// own native web call UI (ring/accept/mute/video/end) with real PJSIP/Opus media — none of which
+// the ?windows=1 hybrid can do. The hybrid stays the main chat window; this window handles calls.
 //
-// Architecture (the relay-through-the-bridge-contract model):
-//   hybrid window (?windows=1, native bridges) ──IPC──> engine window (plain web, WASM voip)
-//   inbound:  VoipSignalingBridge.handleIncomingSignalingOffer → pushOfferToEngine → engine
-//   control:  VoipBridge.voipInit/startCall/endCall/… → engineControl → engine stack method
-//   outbound: engine's WAWebVoipSendSignalingXmpp + ToWeb callbacks → wa-engine:engine-out
-//             → setOutboundRelay → hybrid page's subscribe sink → hybrid socket sends it
-//   media:    mic/SRTP/relay live entirely inside this window.
+// No bridging into the hybrid: the engine is a plain WhatsApp Web client. The only hook is
+// raiseCallWindow(), which the hybrid's VoipSignalingBridge calls to surface this window when a
+// call comes in.
 
 import { BrowserWindow, ipcMain, session } from 'electron';
 import path from 'node:path';
 
 const WA_ORIGIN = 'https://web.whatsapp.com/';
 const WA_HOST_ORIGIN = new URL(WA_ORIGIN).origin;
-// Persistent partition → the engine is its OWN logged-in web device (own QR, scanned once,
-// login survives restarts). A real web-identity session = the server ships the web bundle with
-// the WASM voip stack (real acceptCall + media) — impossible on the hybrid's windows identity.
+// Persistent partition → its own logged-in web device, login survives restarts (one-time QR).
 const ENGINE_PARTITION = 'persist:wa-engine';
-
-export interface EngineOfferPayload {
-  xmlNodeBase64: string; msgPlatform: string; msgVersion: string; msgE: string;
-  msgT: string; msgOffline: boolean; isOfferNotContact: boolean; peerJid: string;
-  tcToken?: unknown;
-}
-export interface EngineSignalingPayload { xmlNodeBase64: string; extraArgs: unknown[]; }
-export interface EngineAckPayload { xmlNodeBase64: string; ackInfoError: unknown; ackInfoType: unknown; peerJid: string; }
 
 let engineWindow: BrowserWindow | null = null;
 let ipcInstalled = false;
 
-// Relay registered by voip.ts: engine outbound → hybrid sharedTw ToWeb bus.
-let outboundRelay: ((method: string, args: unknown[]) => void) | null = null;
-export function setOutboundRelay(fn: (method: string, args: unknown[]) => void): void { outboundRelay = fn; }
-
-// Relay registered by main.ts: engine native call events → hybrid window, replayed there via
-// WAWebVoipHandleNativeCallEvent so the call UI rings.
-let nativeEventRelay: ((eventType: unknown, eventDataJson: unknown) => void) | null = null;
-export function setNativeEventRelay(fn: (eventType: unknown, eventDataJson: unknown) => void): void { nativeEventRelay = fn; }
-
-// Generic IVoipBridgeToWeb event dispatch: fire any "<method>Event" on the hybrid's VoipBridge host
-// object (the EventTarget surface the bundle subscribes to). Registered by main.ts.
-let bridgeEventSender: ((eventName: string, payload: unknown) => void) | null = null;
-export function setBridgeEventSender(fn: (eventName: string, payload: unknown) => void): void { bridgeEventSender = fn; }
-export function dispatchVoipBridgeEvent(eventName: string, payload: unknown): void {
-  if (bridgeEventSender) bridgeEventSender(eventName, payload);
-  else console.warn('[engine] bridge event before sender registered:', eventName);
-}
-
-function engineSend(channel: string, ...payload: unknown[]): void {
-  if (engineWindow && !engineWindow.isDestroyed()) engineWindow.webContents.send(channel, ...payload);
-}
-
-// Show the engine on-screen for QR pairing, or hide it once paired. WA_ENGINE_SHOW forces it
-// visible for debugging. Hiding uses minimize() — reliable across Linux WMs (off-screen
-// positioning gets clamped back on-screen on X11) — and the renderer stays alive
-// (backgroundThrottling:false), so the voip/media engine keeps running and call audio plays.
-function showEngineWindow(forPairing: boolean): void {
-  if (!engineWindow || engineWindow.isDestroyed() || process.env.WA_ENGINE_SHOW) return;
-  if (forPairing) { engineWindow.restore(); engineWindow.setSkipTaskbar(false); engineWindow.center(); engineWindow.show(); }
-  else { engineWindow.setSkipTaskbar(true); engineWindow.minimize(); }
-}
-
-// ── Push API (called by voip.ts bridge methods) ──────────────────────────────
-export function pushOfferToEngine(payload: EngineOfferPayload): void { engineSend('wa-engine:push-offer', payload); }
-export function pushSignalingToEngine(payload: EngineSignalingPayload): void { engineSend('wa-engine:push-signaling', payload); }
-export function pushAckToEngine(payload: EngineAckPayload): void { engineSend('wa-engine:push-ack', payload); }
-// Generic control: drive any engine stack method (acceptCall, rejectCall, endCall, setCallMute, …).
-// The engine's audio output stays muted (so its own incoming-call ringtone is silent — only the
-// hybrid rings); unmute on accept so the remote audio is heard, re-mute when the call ends.
-export function engineControl(method: string, args: unknown[]): void {
-  if (engineWindow && !engineWindow.isDestroyed()) {
-    if (method === 'acceptCall') engineWindow.webContents.setAudioMuted(false);
-    else if (method === 'endCall' || method === 'rejectCall' || method === 'rejectCallWithoutCallContext' || method === 'handleSignOut') engineWindow.webContents.setAudioMuted(true);
-  }
-  engineSend('wa-engine:control', method, args);
-}
 export function isEngineReady(): boolean { return engineWindow !== null && !engineWindow.isDestroyed(); }
 
-// Same shims as CALL_MODE: grant mic/cam to the Permissions API + force web-calling
-// AB props on so the WASM voip module is allowed to download/init.
+// Surface the call window (called by the hybrid on an incoming offer so the user doesn't miss it).
+export function raiseCallWindow(): void {
+  if (!engineWindow || engineWindow.isDestroyed()) return;
+  if (engineWindow.isMinimized()) engineWindow.restore();
+  engineWindow.show();
+  engineWindow.focus();
+}
+
+// Grant mic/cam to the Permissions API + force web-calling AB props on so the voip module inits.
 const CALL_SHIMS_JS = `(() => {
   if (window.__waCallShims) return;
   window.__waCallShims = true;
@@ -116,9 +64,8 @@ export function createEngineWindow(): void {
   if (engineWindow) return;
   installEngineIpc();
 
-  // The engine gets its OWN session (not the hybrid's defaultSession), so the server sees a plain
-  // web client and serves the web voip bundle. Configure it independently — defaultSession's
-  // config doesn't apply here.
+  // Its OWN session (not the hybrid's defaultSession), so the server sees a plain web client and
+  // serves the web voip bundle. Configure it independently — defaultSession's config doesn't apply.
   const engineSession = session.fromPartition(ENGINE_PARTITION);
   const userAgent = engineSession.getUserAgent()
     .replace(/ Electron\/[^ ]+/, '').replace(/ WhatsWine\/[^ ]+/, '');
@@ -131,10 +78,9 @@ export function createEngineWindow(): void {
     ['media', 'microphone', 'camera', 'speaker-selection'].includes(permission) || origin === WA_HOST_ORIGIN);
 
   engineWindow = new BrowserWindow({
-    width: 900, height: 700,
+    width: 1000, height: 760,
     show: false,
-    skipTaskbar: true,
-    title: 'WhatsWine call engine',
+    title: 'WhatsWine — Calls',
     webPreferences: {
       preload: path.join(__dirname, 'engine-preload.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: true,
@@ -143,64 +89,35 @@ export function createEngineWindow(): void {
     },
   });
 
-  // Boot with a real rendered surface so the voip/media engine inits (a never-shown window has no
-  // surface and the WA SPA stalls). Off-screen is best-effort (X11 may clamp it on-screen briefly);
-  // the login-state signal then minimizes it once paired, or shows it on-screen for the QR.
-  if (process.env.WA_ENGINE_SHOW) { engineWindow.show(); }
-  else { engineWindow.setPosition(-10000, -10000); engineWindow.showInactive(); }
+  // Visible: this is the user's call window (QR on first run, then WhatsApp's native call UI).
+  engineWindow.show();
 
   const wc = engineWindow.webContents;
-  // Mute the engine's audio output so its own incoming-call ringtone is silent (only the hybrid
-  // rings); engineControl() unmutes on accept so the remote audio plays.
-  wc.setAudioMuted(true);
-  wc.on('did-finish-load', () => console.log('[engine] page loaded:', wc.getURL()));
+  wc.on('did-finish-load', () => console.log('[call-window] page loaded:', wc.getURL()));
 
-  // WA checks navigator.storage.persist() at boot even in an ephemeral session.
+  // WA checks navigator.storage.persist() at boot.
   try {
     wc.debugger.attach('1.3');
     wc.debugger.sendCommand('Browser.setPermission', { permission: { name: 'persistent-storage' }, setting: 'granted', origin: WA_ORIGIN })
-      .catch((e: unknown) => console.error('[engine] persistent-storage grant failed:', e))
+      .catch((e: unknown) => console.error('[call-window] persistent-storage grant failed:', e))
       .finally(() => { try { wc.debugger.detach(); } catch { /* detached */ } });
-  } catch (e) { console.error('[engine] debugger attach failed:', e); }
+  } catch (e) { console.error('[call-window] debugger attach failed:', e); }
 
   wc.on('dom-ready', () => { wc.executeJavaScript(CALL_SHIMS_JS).catch(() => undefined); });
-  wc.on('did-fail-load', (_e, code, desc, url) => console.error('[engine] did-fail-load:', code, desc, url));
+  wc.on('did-fail-load', (_e, code, desc, url) => console.error('[call-window] did-fail-load:', code, desc, url));
   if (process.env.WA_BRIDGE_DEBUG) {
-    wc.on('console-message', (_e, level, message) => { if (level >= 1) console.log(`[engine-console:${level}] ${message}`.slice(0, 1200)); });
+    wc.on('console-message', (_e, level, message) => { if (level >= 1) console.log(`[call-window-console:${level}] ${message}`.slice(0, 1200)); });
   }
-  wc.setWindowOpenHandler(() => ({ action: 'deny' }));   // headless core: no popups
-  // Don't let close destroy it — hide and keep the session alive.
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+  // Don't destroy on close — hide and keep the session/login alive.
   engineWindow.on('close', (e) => { e.preventDefault(); engineWindow?.hide(); });
 
-  engineWindow.loadURL(WA_ORIGIN, { userAgent });   // plain web → WASM voip stack
-  console.log('[engine] call-engine window created (own persistent web session; scan its QR once)');
+  engineWindow.loadURL(WA_ORIGIN, { userAgent });   // plain web → web voip bundle
+  console.log('[call-window] created (own persistent web session; scan its QR once)');
 }
 
 function installEngineIpc(): void {
   if (ipcInstalled) return;
   ipcInstalled = true;
-
-  ipcMain.on('wa-engine:ready', (_e, info: unknown) => console.log('[engine] WASM voip stack ready:', JSON.stringify(info)));
-  ipcMain.on('wa-engine:log', (_e, msg: unknown) => { if (process.env.WA_BRIDGE_DEBUG) console.log('[engine]', msg); });
-
-  // Engine login state → show the window for QR pairing (logged-out) or hide it once paired.
-  ipcMain.on('wa-engine:login-state', (_e, state: { loggedIn?: boolean }) => {
-    const loggedIn = !!state?.loggedIn;
-    console.log('[engine] login-state:', loggedIn ? 'logged-in (hiding)' : 'logged-out (showing QR)');
-    showEngineWindow(!loggedIn);
-  });
-
-  // Engine → hybrid: relay every engine ToWeb emission into the hybrid page's subscribe sink.
-  ipcMain.on('wa-engine:engine-out', (_e, method: string, args: unknown[]) => {
-    if (process.env.WA_BRIDGE_DEBUG) console.log('[engine] out:', method, JSON.stringify(args).slice(0, 300));
-    if (outboundRelay) outboundRelay(method, args);
-    else console.warn('[engine] engine-out before relay registered:', method);
-  });
-
-  // Engine → hybrid: relay native call events (onCallEvent) to replay in the hybrid UI.
-  ipcMain.on('wa-engine:native-call-event', (_e, eventType: unknown, eventDataJson: unknown) => {
-    if (process.env.WA_BRIDGE_DEBUG) console.log('[engine] native-call-event:', eventType, String(eventDataJson).slice(0, 200));
-    if (nativeEventRelay) nativeEventRelay(eventType, eventDataJson);
-    else console.warn('[engine] native-call-event before relay registered:', eventType);
-  });
+  ipcMain.on('wa-engine:log', (_e, msg: unknown) => { if (process.env.WA_BRIDGE_DEBUG) console.log('[call-window]', msg); });
 }

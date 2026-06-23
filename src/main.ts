@@ -7,7 +7,7 @@ import { installSoundPlayer } from './sound';
 import { installRingtone } from './ringtone';
 import { showMainWindow } from './window';
 import { installBridges } from './bridge/registry';
-import { createEngineWindow, setNativeEventRelay, setBridgeEventSender } from './engine-window';
+import { createEngineWindow } from './engine-window';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
@@ -451,27 +451,16 @@ function runWebSmoke(wc: Electron.WebContents) {
 app.on('before-quit', () => { isQuitting = true; });
 
 app.on('ready', () => {
-  // WA_ENGINE_ONLY=1: diagnostic — create ONLY the logged-out engine window, no hybrid window.
-  // Isolates whether the voip-module load failure is caused by two web.whatsapp.com windows
-  // running together vs. the engine alone (which loaded the module fine in the single-window smoke).
+  // WA_ENGINE_ONLY=1: launch ONLY the call window (a standalone logged-in web device), no hybrid.
   if (process.env.WA_ENGINE_ONLY === '1') { createEngineWindow(); return; }
 
   // Call mode is plain-web, so the native host-object bridges are unused — skip them (doc 43 §6).
   if (!CALL_MODE) installBridges();
   createWindow();
   createTray();
-  // Hybrid-calls: create the hidden engine window AFTER installBridges() — voip.ts registers the
-  // outbound relay during installBridges(), which the engine window needs before it emits.
-  if (HYBRID_CALLS) {
-    // Fire any IVoipBridgeToWeb "<method>Event" on the hybrid's VoipBridge host object.
-    setBridgeEventSender((eventName, payload) =>
-      mainWindow?.webContents.send('wa-bridge:event', 'VoipBridge', eventName, payload));
-    // The engine emits {eventType, eventDataJson}; deliver it as a VoipBridge "handleVoipCallEvent"
-    // (the IVoipBridgeToWeb EventTarget surface the bundle subscribes to) so the call UI rings.
-    setNativeEventRelay((eventType, eventDataJson) =>
-      mainWindow?.webContents.send('wa-bridge:event', 'VoipBridge', 'handleVoipCallEvent', { eventType, userData: 0, eventDataJson }));
-    createEngineWindow();
-  }
+  // Dual-window calling (analysis/docs/99): the hybrid is the chat window; open a separate visible
+  // call window (its own logged-in web device) that handles calls in WhatsApp's native call UI.
+  if (HYBRID_CALLS) createEngineWindow();
 });
 
 // With a tray the app keeps running when the window is hidden; quit only on explicit Quit.
