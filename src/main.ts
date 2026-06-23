@@ -222,7 +222,7 @@ const createWindow = () => {
       permission === 'clipboard-sanitized-write',
     );
   });
-  if (CALL_MODE) {
+  if (CALL_MODE || HYBRID_CALLS) {
     // Let the call window open mic/cam devices (getUserMedia with a deviceId goes through this,
     // separate from the request handler above).
     session.defaultSession.setDevicePermissionHandler(() => true);
@@ -234,7 +234,7 @@ const createWindow = () => {
   // empty/differ for the capture frame/worker, and a denied check makes getUserMedia return a
   // silent track (electron#23792).
   session.defaultSession.setPermissionCheckHandler((_wc, permission, origin) => {
-    if (CALL_MODE && ['media', 'microphone', 'camera', 'speaker-selection'].includes(permission)) return true;
+    if ((CALL_MODE || HYBRID_CALLS) && ['media', 'microphone', 'camera', 'speaker-selection'].includes(permission)) return true;
     return origin === WA_HOST_ORIGIN;
   });
 

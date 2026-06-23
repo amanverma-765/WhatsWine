@@ -182,6 +182,22 @@ contextBridge.executeInMainWorld({
         if (!cc || typeof origSet !== 'function') { console.log('[wabridge] WAWebCallCollection.setActiveCall not a fn in frontend'); return; }
         cc.setActiveCall = (c: unknown) => {
           console.log('[wabridge] FRONTEND setActiveCall ' + (c ? 'CALL id=' + String((c as { id?: unknown }).id) : 'null'));
+          // Wrap the call model's likely action methods to discover what Accept/Decline invoke on it.
+          if (c && typeof c === 'object') {
+            const model = c as Record<string, unknown> & { __waW?: boolean };
+            if (!model.__waW) {
+              model.__waW = true;
+              let proto = Object.getPrototypeOf(model) as object | null;
+              const names = new Set<string>();
+              while (proto && proto !== Object.prototype) { for (const k of Object.getOwnPropertyNames(proto)) names.add(k); proto = Object.getPrototypeOf(proto); }
+              for (const k of names) {
+                if (!/^(accept|answer|reject|decline|end|hangup|hangUp|setState|toggleMute|mute|setMute|setVideo)/i.test(k)) continue;
+                const f = model[k];
+                if (typeof f === 'function') { model[k] = (...args: unknown[]) => { console.log('[wabridge] callModel.' + k + ' args=' + args.length); return (f as (...a: unknown[]) => unknown).apply(model, args); }; }
+              }
+              console.log('[wabridge] call model action methods wrapped');
+            }
+          }
           return origSet.call(cc, c);
         };
         console.log('[wabridge] frontend WAWebCallCollection.setActiveCall hooked');
