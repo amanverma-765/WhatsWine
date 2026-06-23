@@ -305,7 +305,7 @@ const createWindow = () => {
   wc.setWindowOpenHandler(({ url }) => {
     let sameOriginWa = false;
     try { sameOriginWa = new URL(url).origin === WA_HOST_ORIGIN; } catch { /* about:blank etc. */ }
-    if (CALL_MODE && (sameOriginWa || url === 'about:blank' || url === '')) {
+    if ((CALL_MODE || HYBRID_CALLS) && (sameOriginWa || url === 'about:blank' || url === '')) {
       return { action: 'allow', overrideBrowserWindowOptions: { width: 480, height: 720, autoHideMenuBar: true } };
     }
     if (url.startsWith('http://') || url.startsWith('https://')) {
@@ -346,12 +346,12 @@ const createWindow = () => {
   // Results appear as [wa-voip-probe] lines in the console (also visible with WA_BRIDGE_DEBUG).
   if (process.env.WA_VOIP_PROBE) installVoipProbe(wc);
 
-  if (CALL_MODE) {
-    installCallShims(wc);
+  if (CALL_MODE) installCallShims(wc);
+  if (CALL_MODE || HYBRID_CALLS) {
     wc.on('did-create-window', (win) => {
       // The call popout is a separate webContents (allowed above) — give it the same shims so its
       // mic-permission gate clears and the call button/engine work there too.
-      installCallShims(win.webContents);
+      if (CALL_MODE) installCallShims(win.webContents);
       // Auto-close the popout when the call ends. WhatsApp doesn't reliably window.close() it in
       // Electron, so it lingers showing a dark dead call screen. Its title is "WhatsApp call"
       // during the call; once it reverts to the idle "WhatsApp" title, the call is over — close it.

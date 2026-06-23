@@ -182,6 +182,16 @@ contextBridge.executeInMainWorld({
         };
         console.log('[wabridge] frontend WAWebCallCollection.setActiveCall hooked');
       });
+      // ?windows=1 skips setupVoipActiveCallChangeListener (the native app manages the call window),
+      // so the call-UI popout never opens on an active call. Enable the web behaviour ourselves: this
+      // subscribes to activeCall changes and opens the call popout when a call rings.
+      rl(['WAWebVoipUiManager'], (UM) => {
+        const um = UM as Record<string, unknown> | null;
+        const fn = um?.setupVoipActiveCallChangeListener as (() => void) | undefined;
+        if (typeof fn !== 'function') { console.log('[wabridge] setupVoipActiveCallChangeListener not a fn'); return; }
+        try { fn(); console.log('[wabridge] setupVoipActiveCallChangeListener enabled (call popout)'); }
+        catch (e) { console.log('[wabridge] setupVoipActiveCallChangeListener threw: ' + String(e)); }
+      });
     };
     hookHybridDispatch();
 
