@@ -136,10 +136,30 @@ contextBridge.executeInMainWorld({
       },
     });
 
-    const w = window as unknown as { chrome?: { webview?: Record<string, unknown> } };
+    const w = window as unknown as { chrome?: { webview?: Record<string, unknown> }; requireLazy?: (mods: string[], cb: (...m: unknown[]) => void) => void };
     w.chrome = w.chrome || {};
     w.chrome.webview = w.chrome.webview || {};
     w.chrome.webview.hostObjects = hostObjects;
+
+    // Diagnostic: in ?windows=1 the native call-event funnel handleWAWebVoipNativeCallEvent runs in
+    // THIS frontend. Hook it to confirm our synthesized handleVoipCallEvent reaches it (vs. being
+    // dropped at $3==null because handleVoipReady never wired the handlers).
+    const hookHybridDispatch = (tries = 0) => {
+      const rl = w.requireLazy;
+      if (!rl) { if (tries < 60) setTimeout(() => hookHybridDispatch(tries + 1), 500); return; }
+      rl(['WAWebVoipHandleNativeCallEvent'], (mod) => {
+        const H = mod as Record<string, unknown> | null;
+        if (!H || typeof H.handleWAWebVoipNativeCallEvent !== 'function') return;
+        const orig = H.handleWAWebVoipNativeCallEvent as (...a: unknown[]) => unknown;
+        H.handleWAWebVoipNativeCallEvent = (et: unknown, json: unknown, ...rest: unknown[]) => {
+          console.log('[wabridge] handleWAWebVoipNativeCallEvent reached: type=' + String(et));
+          try { const r = orig(et, json, ...rest); if (r && (r as Promise<unknown>).catch) (r as Promise<unknown>).catch((e) => console.log('[wabridge] dispatch async threw: ' + String((e as Error)?.stack || e).slice(0, 400))); return r; }
+          catch (e) { console.log('[wabridge] dispatch sync threw: ' + String((e as Error)?.stack || e).slice(0, 400)); throw e; }
+        };
+        console.log('[wabridge] hybrid handleWAWebVoipNativeCallEvent hooked');
+      });
+    };
+    hookHybridDispatch();
 
     // Legacy comma-IPC shim (bridgeError=1, doc 31 §5.2) — no-throw; modern bundle
     // uses hostObjects. ponytail: native->JS legacy events unused.
