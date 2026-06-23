@@ -244,13 +244,26 @@ contextBridge.executeInMainWorld({
     };
     hookHybridDispatch();
 
-    // Discovery: does the Accept/Decline click even reach the DOM, and does it lazy-load a voip action?
+    // The bundle's call-control button handlers are inert in ?windows=1 (native Windows drives them),
+    // but the clicks land on identifiable elements. So WE own the buttons: intercept Accept/Decline/Mute
+    // and drive the hidden WASM engine via VoipBridge. acceptCall(isMic,isCam) / rejectCall() / setCallMute.
     try {
+      const voipBridge = () => (w.chrome?.webview?.hostObjects as Record<string, Record<string, (...a: unknown[]) => unknown>> | undefined)?.VoipBridge;
       document.addEventListener('click', (e) => {
         const t = e.target as { tagName?: string; textContent?: string; getAttribute?: (a: string) => string | null } | null;
-        const txt = (t?.textContent || '').replace(/\s+/g, ' ').slice(0, 40);
-        const al = t?.getAttribute?.('aria-label') || '';
-        console.log('[wabridge] CLICK <' + (t?.tagName || '?') + '> aria="' + al + '" text="' + txt + '"');
+        const txt = (t?.textContent || '').replace(/\s+/g, ' ').trim();
+        const al = (t?.getAttribute?.('aria-label') || '').trim();
+        if (txt === 'Accept' || txt === 'Decline' || txt === 'End call' || /mute microphone/i.test(al)) {
+          console.log('[wabridge] CLICK <' + (t?.tagName || '?') + '> aria="' + al + '" text="' + txt + '"');
+          try {
+            const vb = voipBridge();
+            if (!vb) { console.log('[wabridge] no VoipBridge for click'); return; }
+            if (txt === 'Accept') { console.log('[wabridge] -> engine acceptCall(true,false)'); vb.acceptCall(true, false); }
+            else if (txt === 'Decline') { console.log('[wabridge] -> engine rejectCall()'); vb.rejectCall(); }
+            else if (txt === 'End call') { console.log('[wabridge] -> engine endCall'); vb.endCall(); }
+            else if (/mute microphone/i.test(al)) { console.log('[wabridge] -> engine setCallMute(true)'); vb.setCallMute(true); }
+          } catch (err) { console.log('[wabridge] click->engine err: ' + String(err)); }
+        }
       }, true);
       const rlw = (window as unknown as { requireLazy?: (m: string[], cb: (...x: unknown[]) => void) => void });
       const origRl = rlw.requireLazy;

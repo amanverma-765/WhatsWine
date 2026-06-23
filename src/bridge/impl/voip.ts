@@ -179,6 +179,10 @@ function voipBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactory> {
       ctx.log('[VoipBridge] rejectCall', ...args);
       engineControl('rejectCall', args);
     },
+    setCallMute: (...args: unknown[]) => {
+      ctx.log('[VoipBridge] setCallMute', ...args);
+      engineControl('setCallMute', args);
+    },
 
     // ── FUNCTIONAL: JID-resolution reply handlers ─────────────────────────
     // The engine asks (requestDeviceJidList/PN↔LID via the relay) → the hybrid bundle
