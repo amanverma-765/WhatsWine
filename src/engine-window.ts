@@ -234,6 +234,117 @@ export function createEngineWindow(): void {
   console.log('[engine] Set WA_ENGINE_SHOW=1 to reveal the window and scan its QR');
 }
 
+// ─── Path B probe window ──────────────────────────────────────────────────────
+// Created when WA_PATHB=1. Uses an EPHEMERAL partition ('partition:wa-pathb',
+// no 'persist:' prefix) so it is ALWAYS logged-out — no QR scan needed for U1.
+//
+// The window loads plain-web WhatsApp (no ?windows=1), injects the call shims,
+// then triggers the structured Path B probe in engine-preload.ts via IPC after
+// a 4 s settle delay.  All [path-b] log lines from the bundle are forwarded to
+// stdout so the user can paste them without a devtools session.
+//
+// If WA_PATHB_SMOKE=1 the window is hidden (headless); the main process sets a
+// quit timer after the probe result arrives (see main.ts).
+
+const PATHB_PARTITION = 'partition:wa-pathb'; // ephemeral — never persisted to disk
+
+export function createPathBWindow(): void {
+  installEngineIpc(); // idempotent — also registers wa-engine:pathb-result handler
+
+  const pathbSession = session.fromPartition(PATHB_PARTITION);
+
+  // Strip Electron / app-name tokens so WA serves the plain-web bundle
+  const rawUa = pathbSession.getUserAgent();
+  const userAgent = rawUa
+    .replace(/ Electron\/[^ ]+/, '')
+    .replace(new RegExp(' WhatsWine/[^ ]+'), '');
+  pathbSession.setUserAgent(userAgent);
+
+  // Grant mic/cam/notification permissions (needed so gating checks pass)
+  pathbSession.setPermissionRequestHandler((_wc, permission, callback) => {
+    callback(
+      permission === 'notifications' ||
+      permission === 'media' ||
+      permission === 'clipboard-sanitized-write',
+    );
+  });
+  pathbSession.setDevicePermissionHandler(() => true);
+  pathbSession.setPermissionCheckHandler((_wc, permission, origin) => {
+    if (['media', 'microphone', 'camera', 'speaker-selection'].includes(permission)) return true;
+    return origin === WA_HOST_ORIGIN;
+  });
+
+  const win = new BrowserWindow({
+    width: 1200,
+    height: 820,
+    // Hide in smoke mode; otherwise show so the user sees the WA QR page
+    show: !process.env.WA_PATHB_SMOKE,
+    title: 'WhatsWine Path-B Probe',
+    webPreferences: {
+      preload: path.join(__dirname, 'engine-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      partition: PATHB_PARTITION,
+    },
+  });
+
+  const wc = win.webContents;
+
+  // Always forward ALL console messages so [path-b] lines appear in the terminal.
+  // (WA_BRIDGE_DEBUG gating omitted intentionally — Path B is investigation mode.)
+  wc.on('console-message', (_e, level, message) => {
+    if (level >= 1) console.log(`[pathb-page] ${message}`.slice(0, 2000));
+  });
+
+  // Force persistent-storage via CDP — same belt-and-suspenders as the engine window.
+  // Even in an ephemeral session WA checks navigator.storage.persist() at boot.
+  try {
+    wc.debugger.attach('1.3');
+    wc.debugger
+      .sendCommand('Browser.setPermission', {
+        permission: { name: 'persistent-storage' },
+        setting: 'granted',
+        origin: WA_ORIGIN,
+      })
+      .catch((e: unknown) => console.error('[path-b] persistent-storage grant failed:', e))
+      .finally(() => { try { wc.debugger.detach(); } catch { /* already detached */ } });
+  } catch (e) {
+    console.error('[path-b] debugger attach failed:', e);
+  }
+
+  // Inject call shims so enable_web_calling / enable_web_group_calling are forced on.
+  // This sets isVoipDownloadEnabled:true even pre-login, which allows the lazy WASM
+  // chunk's requireLazy callback to fire (the guard inside the module checks this flag).
+  wc.on('dom-ready', () => {
+    wc.executeJavaScript(CALL_SHIMS_JS).catch(() => undefined);
+  });
+
+  // After the page has loaded and requireLazy has initialised (~4 s), trigger the probe.
+  wc.once('did-finish-load', () => {
+    console.log('[path-b] page loaded:', wc.getURL());
+    console.log('[path-b] waiting 4 s for requireLazy to initialise before probing...');
+    setTimeout(() => {
+      console.log('[path-b] sending wa-engine:run-pathb trigger');
+      wc.send('wa-engine:run-pathb');
+    }, 4000);
+  });
+
+  wc.on('did-fail-load', (_e, code, desc, url) => {
+    console.error('[path-b] did-fail-load:', code, desc, url);
+  });
+
+  // Block popups — probe window has no UI
+  wc.setWindowOpenHandler(() => ({ action: 'deny' }));
+
+  // Plain-web URL — no ?windows=1 → WAWebEnvironment.isWindows === false
+  // → bundle binds WAWebVoipStackInterfaceWeb (WASM) not Windows native stub
+  win.loadURL(WA_ORIGIN, { userAgent });
+
+  console.log('[path-b] probe window created (ephemeral partition, always logged-out)');
+  console.log('[path-b] probe fires automatically after 4 s; [path-b] lines show in console');
+}
+
 // ─── IPC handlers (engine → main) ────────────────────────────────────────────
 
 function installEngineIpc(): void {
@@ -243,6 +354,12 @@ function installEngineIpc(): void {
   // WASM voip stack initialized and outbound surface intercepted in engine preload
   ipcMain.on('wa-engine:ready', (_e, info: unknown) => {
     console.log('[engine] WASM voip stack ready:', JSON.stringify(info));
+  });
+
+  // Path B feasibility probe result — logged with full [path-b] prefix for easy grepping.
+  // Sent by engine-preload after the structured U1/API/U2 investigation completes.
+  ipcMain.on('wa-engine:pathb-result', (_e, result: unknown) => {
+    console.log('[path-b] RESULT (from preload):', JSON.stringify(result));
   });
 
   // Module probe: confirms whether WAWebVoipStackInterfaceWeb is loadable in

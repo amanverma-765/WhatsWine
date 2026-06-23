@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session, shell, Tray, Menu } from 'electron';
+import { app, BrowserWindow, ipcMain, session, shell, Tray, Menu } from 'electron';
 import path from 'node:path';
 import { writeFileSync } from 'node:fs';
 import started from 'electron-squirrel-startup';
@@ -7,7 +7,7 @@ import { installSoundPlayer } from './sound';
 import { installRingtone } from './ringtone';
 import { showMainWindow } from './window';
 import { installBridges } from './bridge/registry';
-import { createEngineWindow } from './engine-window';
+import { createEngineWindow, createPathBWindow } from './engine-window';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
@@ -48,6 +48,15 @@ const CALL_MODE = process.env.WA_CALL_MODE === '1';
 // Incompatible with CALL_MODE (both are mutually exclusive). See src/engine-window.ts + NOTES.md.
 const ENGINE_MODE = process.env.WA_ENGINE_MODE === '1' && !CALL_MODE;
 
+// PATH B MODE (WA_PATHB=1): feasibility spike — skip the hybrid main window entirely and create
+// only an ephemeral plain-web probe window (always logged-out, no QR needed). After the page
+// loads the engine-preload runs a structured U1/API/U2 investigation and prints [path-b] log
+// lines. Answers two unknowns: can WAWebVoipStackInterfaceWeb be loaded pre-login (U1), and what
+// does the stack demand when fed a synthetic offer (U2)? See NOTES-PATHB.md and engine-window.ts.
+// WA_PATHB_SMOKE=1: headless run that auto-quits once the probe result arrives (or after 22 s).
+const PATHB_MODE  = process.env.WA_PATHB       === '1';
+const PATHB_SMOKE = process.env.WA_PATHB_SMOKE === '1' && PATHB_MODE;
+
 if (CALL_MODE) {
   app.setPath('userData', path.join(app.getPath('appData'), 'whatswine-call'));
   // SharedArrayBuffer safety net for the WASM voip gate. We do NOT force COOP ourselves — WhatsApp
@@ -62,6 +71,12 @@ if (CALL_MODE) {
 if (ENGINE_MODE) {
   // The hidden engine window needs SAB (WASM voip gate) and audio (mic/camera for media).
   // Same rationale as CALL_MODE above — the engine window loads plain web with WASM voip.
+  app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
+  app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
+}
+
+if (PATHB_MODE) {
+  // Path B probe window is plain-web with WASM voip — needs SAB and audio, same as CALL_MODE.
   app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
   app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
 }
@@ -443,6 +458,27 @@ function runWebSmoke(wc: Electron.WebContents) {
 app.on('before-quit', () => { isQuitting = true; });
 
 app.on('ready', () => {
+  // PATH B: skip the hybrid main window entirely; create only the ephemeral probe window.
+  // No tray, no bridges — this is a pure investigation tool.
+  if (PATHB_MODE) {
+    if (PATHB_SMOKE) {
+      // Quit as soon as the probe result IPC arrives (1 s grace for trailing logs).
+      // The handler in installEngineIpc() also fires and logs the result — both are fine.
+      ipcMain.once('wa-engine:pathb-result', () => {
+        console.log('[path-b] probe complete — quitting in 1 s');
+        setTimeout(() => { isQuitting = true; app.quit(); }, 1000);
+      });
+      // 22 s hard fallback in case the result never arrives (page failed to load, etc.)
+      setTimeout(() => {
+        console.log('[path-b] SMOKE TIMEOUT (22 s) — forcing quit');
+        isQuitting = true;
+        app.quit();
+      }, 22000);
+    }
+    createPathBWindow();
+    return;
+  }
+
   // Call mode is plain-web, so the native host-object bridges are unused — skip them (doc 43 §6).
   if (!CALL_MODE) installBridges();
   createWindow();
@@ -455,6 +491,11 @@ app.on('ready', () => {
 // With a tray the app keeps running when the window is hidden; quit only on explicit Quit.
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin' && isQuitting) {
+    app.quit();
+  }
+  // In Path B mode there is no tray — quitting the probe window should exit the process.
+  if (PATHB_MODE) {
+    isQuitting = true;
     app.quit();
   }
 });
