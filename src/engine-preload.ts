@@ -92,10 +92,12 @@ contextBridge.executeInMainWorld({
     // Read/written by p.onPushOffer to feed offers and schedule acceptCall.
     let rtStack: Record<string, unknown> | null = null;
     const rtFiredCallbacks: string[] = [];
-    let rtLastPeerJid: string | null = null;   // peerJid from most-recent real offer
-    let rtOfferFed = false;                     // true once offer was fed to stack
-    let rtEngineReacted = false;                // true once engine emits any event after offer
-    const rtEvidence: string[] = [];            // event names captured after offer
+    let rtLastPeerJid: string | null = null;      // peerJid from most-recent real offer
+    let rtOfferFed = false;                        // true once offer was fed to stack
+    let rtEngineReacted = false;                   // true once genuine outbound/event fires post-offer
+    const rtEvidence: string[] = [];               // outbound captures after offer (for verdict)
+    let rtSendVerdict: (() => void) | null = null; // set by onRunRoundtrip; called by onPushOffer timer
+    let rtVerdictTimer: number | undefined;        // armed after offer; cleared on re-arm
 
     // ── 1. Module probe ────────────────────────────────────────────────────────
     // Runs after a short delay to give the bundle time to initialize its module
@@ -206,6 +208,9 @@ contextBridge.executeInMainWorld({
             );
             rtOfferFed = true;
             console.log('[roundtrip] OFFER-FED ' + JSON.stringify({ peerJid: pl.peerJid }));
+            // Arm 8s settle verdict anchored to this offer (re-arm cancels any previous).
+            clearTimeout(rtVerdictTimer);
+            rtVerdictTimer = setTimeout(() => { rtSendVerdict?.(); }, 8000) as unknown as number;
           } catch (e) {
             offerErr = String((e as Error)?.message ?? e);
             if (/enc|decrypt|key|cipher|signal/i.test(offerErr)) {
@@ -696,22 +701,49 @@ contextBridge.executeInMainWorld({
       const rl = getRequireLazy();
       if (!rl) { rt('INIT-FAIL', { why: 'requireLazy absent' }); return; }
 
-      // Verdict — three-way, defined early so all approaches can call sendVerdict.
+      // Inbound methods we call INTO the engine — must NOT count as engine outbound emissions.
+      const INBOUND_ENGINE_METHODS = new Set([
+        'handleIncomingSignalingOffer', 'handleIncomingSignalingMessage',
+        'handleIncomingSignalingAck', 'handleIncomingSignalingReceipt',
+        'handleOnTransportMessage', 'voipInit', 'acceptCall', 'startCall', 'endCall',
+      ]);
+      const isGenuineOutbound = (name: string): boolean => {
+        if (/WAWebVoipSendSignalingXmpp/i.test(name)) return true;
+        if (/WADynamicRouterAsync/i.test(name)) return true;
+        // slot: captures — exclude slots we triggered by calling inbound methods
+        if (name.startsWith('slot:')) return !INBOUND_ENGINE_METHODS.has(name.slice(5));
+        return !INBOUND_ENGINE_METHODS.has(name);
+      };
+
+      // Verdict — offer-anchored (armed by onPushOffer, 90s fallback if no offer).
       let verdictSent = false;
       const sendVerdict = () => {
         if (verdictSent) return;
         verdictSent = true;
         const keyCbs = rtFiredCallbacks.filter(n => /key|cipher|ssrc|hkdf|hmac|derive/i.test(n));
-        const emittedSignalingAfterAccept = rtFiredCallbacks.some(n => /WAWebVoipSendSignalingXmpp/i.test(n));
+        const genuineEvidence = rtEvidence.filter(isGenuineOutbound);
+        const emittedOutboundSignaling = genuineEvidence.some(e => /WAWebVoipSendSignalingXmpp/i.test(e));
+        const offerAcceptedByEngine = rtEngineReacted;
+        // Extract callId from evidence args preview (if present)
+        const cidMatch = rtEvidence.join(' ').match(/"callId"\s*:\s*"([^"]{8,})"/);
         const verdict = {
-          offerAcceptedByEngine: rtEngineReacted,
-          emittedSignalingAfterAccept,
+          offerAcceptedByEngine,
+          emittedOutboundSignaling,
+          callId: cidMatch ? cidMatch[1] : null,
           keyCallbacks: keyCbs,
-          evidence: [...rtEvidence],
+          evidence: genuineEvidence.slice(0, 10),
+          noOfferReceived: !rtOfferFed,
         };
         rt('VERDICT', verdict);
         p.sendRoundtripVerdict(verdict);
       };
+
+      // Expose sendVerdict via shared pointer so onPushOffer can arm the timer.
+      // Also handle the case where the offer arrived before init completed.
+      rtSendVerdict = sendVerdict;
+      if (rtOfferFed && !rtVerdictTimer) {
+        rtVerdictTimer = setTimeout(sendVerdict, 8000) as unknown as number;
+      }
 
       // Universal capturing proxy — used as factory delegate arg AND for setter methods.
       const capProxy = new Proxy({} as Record<string, unknown>, {
@@ -724,9 +756,7 @@ contextBridge.executeInMainWorld({
             rt('KEY-CALLBACK', { name, argsPreview });
           }
           p.sendRoundtripEvent(name, args);
-          if (/signaling|xmpp|voipCall|voipReady/i.test(name)) {
-            setTimeout(sendVerdict, 2000);
-          }
+          // Verdict timing is offer-anchored (armed in onPushOffer), not here.
         },
       });
 
@@ -746,10 +776,18 @@ contextBridge.executeInMainWorld({
           const orig = sm[fnName] as (...a: unknown[]) => unknown;
           sm[fnName] = (...args: unknown[]) => {
             const name = 'WAWebVoipSendSignalingXmpp.' + fnName;
+            const argsPreview = JSON.stringify(args).slice(0, 400);
             rtFiredCallbacks.push(name);
-            rt('ENGINE-OUTBOUND', { method: name, argsPreview: JSON.stringify(args).slice(0, 400) });
+            rt('ENGINE-OUTBOUND', { method: name, argsPreview });
             p.sendRoundtripEvent(name, args);
-            setTimeout(sendVerdict, 2000); // any signaling fn = positive signal
+            if (rtOfferFed) {
+              rtEngineReacted = true;
+              rtEvidence.push(name + ':' + argsPreview.slice(0, 120));
+              rt('OFFER-ACCEPTED-BY-ENGINE', { via: 'WAWebVoipSendSignalingXmpp', method: name });
+              // Re-arm the 8s settle window on each emission
+              clearTimeout(rtVerdictTimer);
+              rtVerdictTimer = setTimeout(sendVerdict, 8000) as unknown as number;
+            }
             return orig.apply(sm, args);
           };
         }
@@ -779,8 +817,11 @@ contextBridge.executeInMainWorld({
             // Any event after offer fed = engine accepted/reacted to the offer
             if (rtOfferFed) {
               rtEngineReacted = true;
-              rtEvidence.push(fnName + ':' + argsPreview.slice(0, 80));
-              rt('OFFER-ACCEPTED-BY-ENGINE', { evidence: rtEvidence });
+              const ev = 'WADynamicRouterAsync.' + fnName + ':' + argsPreview.slice(0, 80);
+              rtEvidence.push(ev);
+              rt('OFFER-ACCEPTED-BY-ENGINE', { via: 'WADynamicRouterAsync', fn: fnName });
+              clearTimeout(rtVerdictTimer);
+              rtVerdictTimer = setTimeout(sendVerdict, 8000) as unknown as number;
             }
             return orig.apply(router, args);
           };
@@ -863,7 +904,7 @@ contextBridge.executeInMainWorld({
                 const argsPreview = JSON.stringify(args).slice(0, 400);
                 rt('ENGINE-OUTBOUND', { method: name, argsPreview });
                 p.sendRoundtripEvent(name, args);
-                if (/signaling|xmpp|voip|call|key|cipher/i.test(key)) setTimeout(sendVerdict, 2000);
+                // Verdict timing is offer-anchored; don't arm here (would trigger on inbound calls).
               };
               settable.push(key);
             } catch { /* read-only */ }
@@ -936,7 +977,9 @@ contextBridge.executeInMainWorld({
           }, 1000);
         }
 
-        setTimeout(sendVerdict, 30000);
+        // 90s fallback — only fires if no offer ever arrived (logs noOfferReceived:true).
+        // Normal path: verdict fires 8s after offer (armed in onPushOffer or Approach A/E).
+        setTimeout(() => { if (!rtOfferFed) sendVerdict(); }, 90000);
       });
     }); // end p.onRunRoundtrip
 
