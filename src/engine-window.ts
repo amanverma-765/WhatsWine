@@ -15,6 +15,11 @@ import { BrowserWindow, ipcMain, session } from 'electron';
 import path from 'node:path';
 
 const WA_ORIGIN = 'https://web.whatsapp.com/';
+const WA_HOST_ORIGIN = new URL(WA_ORIGIN).origin;
+// Persistent partition → the engine is its OWN logged-in web device (own QR, scanned once,
+// login survives restarts). A real web-identity session = the server ships the web bundle with
+// the WASM voip stack (real acceptCall + media) — impossible on the hybrid's windows identity.
+const ENGINE_PARTITION = 'persist:wa-engine';
 
 export interface EngineOfferPayload {
   xmlNodeBase64: string; msgPlatform: string; msgVersion: string; msgE: string;
@@ -49,12 +54,30 @@ function engineSend(channel: string, ...payload: unknown[]): void {
   if (engineWindow && !engineWindow.isDestroyed()) engineWindow.webContents.send(channel, ...payload);
 }
 
+// Show the engine on-screen for QR pairing, or hide it once paired. WA_ENGINE_SHOW forces it
+// visible for debugging. Hiding uses minimize() — reliable across Linux WMs (off-screen
+// positioning gets clamped back on-screen on X11) — and the renderer stays alive
+// (backgroundThrottling:false), so the voip/media engine keeps running and call audio plays.
+function showEngineWindow(forPairing: boolean): void {
+  if (!engineWindow || engineWindow.isDestroyed() || process.env.WA_ENGINE_SHOW) return;
+  if (forPairing) { engineWindow.restore(); engineWindow.setSkipTaskbar(false); engineWindow.center(); engineWindow.show(); }
+  else { engineWindow.setSkipTaskbar(true); engineWindow.minimize(); }
+}
+
 // ── Push API (called by voip.ts bridge methods) ──────────────────────────────
 export function pushOfferToEngine(payload: EngineOfferPayload): void { engineSend('wa-engine:push-offer', payload); }
 export function pushSignalingToEngine(payload: EngineSignalingPayload): void { engineSend('wa-engine:push-signaling', payload); }
 export function pushAckToEngine(payload: EngineAckPayload): void { engineSend('wa-engine:push-ack', payload); }
-// Generic control: drive any engine stack method (voipInit, startCall, acceptCall, endCall, setCallMute, handleDeviceJidList, …).
-export function engineControl(method: string, args: unknown[]): void { engineSend('wa-engine:control', method, args); }
+// Generic control: drive any engine stack method (acceptCall, rejectCall, endCall, setCallMute, …).
+// The engine's audio output stays muted (so its own incoming-call ringtone is silent — only the
+// hybrid rings); unmute on accept so the remote audio is heard, re-mute when the call ends.
+export function engineControl(method: string, args: unknown[]): void {
+  if (engineWindow && !engineWindow.isDestroyed()) {
+    if (method === 'acceptCall') engineWindow.webContents.setAudioMuted(false);
+    else if (method === 'endCall' || method === 'rejectCall' || method === 'rejectCallWithoutCallContext' || method === 'handleSignOut') engineWindow.webContents.setAudioMuted(true);
+  }
+  engineSend('wa-engine:control', method, args);
+}
 export function isEngineReady(): boolean { return engineWindow !== null && !engineWindow.isDestroyed(); }
 
 // Same shims as CALL_MODE: grant mic/cam to the Permissions API + force web-calling
@@ -93,12 +116,19 @@ export function createEngineWindow(): void {
   if (engineWindow) return;
   installEngineIpc();
 
-  // SHARE the hybrid's logged-in session. The WA backend runs in a SharedWorker shared across windows of
-  // the same session+origin, so the engine attaches to the hybrid's already-connected backend (setApi
-  // done, socket open) — a real logged-in backend for the voip WASM WITHOUT a second login. defaultSession
-  // is already configured (UA, media permission, persistent-storage) by the hybrid window's createWindow().
-  const engineSession = session.defaultSession;
-  const userAgent = engineSession.getUserAgent();
+  // The engine gets its OWN session (not the hybrid's defaultSession), so the server sees a plain
+  // web client and serves the web voip bundle. Configure it independently — defaultSession's
+  // config doesn't apply here.
+  const engineSession = session.fromPartition(ENGINE_PARTITION);
+  const userAgent = engineSession.getUserAgent()
+    .replace(/ Electron\/[^ ]+/, '').replace(/ WhatsWine\/[^ ]+/, '');
+  engineSession.setUserAgent(userAgent);
+
+  engineSession.setPermissionRequestHandler((_wc, permission, cb) =>
+    cb(permission === 'notifications' || permission === 'media' || permission === 'clipboard-sanitized-write'));
+  engineSession.setDevicePermissionHandler(() => true);
+  engineSession.setPermissionCheckHandler((_wc, permission, origin) =>
+    ['media', 'microphone', 'camera', 'speaker-selection'].includes(permission) || origin === WA_HOST_ORIGIN);
 
   engineWindow = new BrowserWindow({
     width: 900, height: 700,
@@ -108,22 +138,21 @@ export function createEngineWindow(): void {
     webPreferences: {
       preload: path.join(__dirname, 'engine-preload.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: true,
-      // No partition → defaultSession (shared login + backend SharedWorker with the hybrid).
+      partition: ENGINE_PARTITION,
       backgroundThrottling: false,
     },
   });
 
-  // A never-shown window has no rendering surface — Chromium rejects its WidgetHost and the WA
-  // SPA stalls before booting the voip stack. Give it a real surface by showing it OFF-SCREEN so
-  // it renders + boots media while staying invisible. WA_ENGINE_SHOW puts it on-screen to debug.
-  if (process.env.WA_ENGINE_SHOW) {
-    engineWindow.show();
-  } else {
-    engineWindow.setPosition(-10000, -10000);
-    engineWindow.showInactive();
-  }
+  // Boot with a real rendered surface so the voip/media engine inits (a never-shown window has no
+  // surface and the WA SPA stalls). Off-screen is best-effort (X11 may clamp it on-screen briefly);
+  // the login-state signal then minimizes it once paired, or shows it on-screen for the QR.
+  if (process.env.WA_ENGINE_SHOW) { engineWindow.show(); }
+  else { engineWindow.setPosition(-10000, -10000); engineWindow.showInactive(); }
 
   const wc = engineWindow.webContents;
+  // Mute the engine's audio output so its own incoming-call ringtone is silent (only the hybrid
+  // rings); engineControl() unmutes on accept so the remote audio plays.
+  wc.setAudioMuted(true);
   wc.on('did-finish-load', () => console.log('[engine] page loaded:', wc.getURL()));
 
   // WA checks navigator.storage.persist() at boot even in an ephemeral session.
@@ -144,7 +173,7 @@ export function createEngineWindow(): void {
   engineWindow.on('close', (e) => { e.preventDefault(); engineWindow?.hide(); });
 
   engineWindow.loadURL(WA_ORIGIN, { userAgent });   // plain web → WASM voip stack
-  console.log('[engine] hidden call-engine window created (logged-out, no pairing needed)');
+  console.log('[engine] call-engine window created (own persistent web session; scan its QR once)');
 }
 
 function installEngineIpc(): void {
@@ -153,6 +182,13 @@ function installEngineIpc(): void {
 
   ipcMain.on('wa-engine:ready', (_e, info: unknown) => console.log('[engine] WASM voip stack ready:', JSON.stringify(info)));
   ipcMain.on('wa-engine:log', (_e, msg: unknown) => { if (process.env.WA_BRIDGE_DEBUG) console.log('[engine]', msg); });
+
+  // Engine login state → show the window for QR pairing (logged-out) or hide it once paired.
+  ipcMain.on('wa-engine:login-state', (_e, state: { loggedIn?: boolean }) => {
+    const loggedIn = !!state?.loggedIn;
+    console.log('[engine] login-state:', loggedIn ? 'logged-in (hiding)' : 'logged-out (showing QR)');
+    showEngineWindow(!loggedIn);
+  });
 
   // Engine → hybrid: relay every engine ToWeb emission into the hybrid page's subscribe sink.
   ipcMain.on('wa-engine:engine-out', (_e, method: string, args: unknown[]) => {

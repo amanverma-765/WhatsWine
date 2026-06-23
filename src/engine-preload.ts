@@ -27,6 +27,9 @@ const prim = {
   // engine → main: a native call event to replay in the hybrid via handleWAWebVoipNativeCallEvent
   nativeEvent: (eventType: unknown, eventDataJson: unknown) => ipcRenderer.send('wa-engine:native-call-event', eventType, eventDataJson),
   log:     (msg: string) => ipcRenderer.send('wa-engine:log', msg),
+  // engine → main: the engine's WA login state, so main shows the window for QR pairing when
+  // logged-out and hides it off-screen once logged in.
+  loginState: (loggedIn: boolean) => ipcRenderer.send('wa-engine:login-state', { loggedIn }),
   onOffer:     (h: (pl: unknown) => void) => ipcRenderer.on('wa-engine:push-offer', (_e, pl) => h(pl)),
   onSignaling: (h: (pl: unknown) => void) => ipcRenderer.on('wa-engine:push-signaling', (_e, pl) => h(pl)),
   onAck:       (h: (pl: unknown) => void) => ipcRenderer.on('wa-engine:push-ack', (_e, pl) => h(pl)),
@@ -155,7 +158,6 @@ contextBridge.executeInMainWorld({
     };
 
     let stack: Stack | null = null;
-    let voipInited = false;
     let initTries = 0;
     // Anything (offers, JID answers) can arrive before the stack is ready. Queue and flush on ready.
     const pendingControl: [string, unknown[]][] = [];
@@ -195,6 +197,11 @@ contextBridge.executeInMainWorld({
     // Track the active call so we can synthesize state transitions (the engine's onCallEvent is
     // worker-sealed). Re-emit CallStateChanged with a new CallState using the same call_info fields.
     let activeRing: { CallState: number } & Record<string, unknown> | null = null;
+    // Set once the user accepts in the hybrid: the engine (a separate device) now owns the live
+    // call, so the "accepted-on-another-device" teardown the hybrid receives must NOT dismiss our
+    // puppet UI. ponytail: a remote hangup after accept won't auto-dismiss — user clicks End;
+    // proper fix is polling the engine stack's getCallInfo() for call-ended.
+    let acceptedLocally = false;
     const synthesizeCallState = (state: number, why: string) => {
       if (!activeRing) return;
       const ev = { ...activeRing, CallState: state };
@@ -217,11 +224,8 @@ contextBridge.executeInMainWorld({
       if (!stack) return;
       p.log('stack methods: ' + JSON.stringify(methodNames(stack).slice(0, 60)));
       p.ready({ type: stack.type ?? 'unknown', hasOffer: typeof stack.handleIncomingSignalingOffer === 'function' });
-      // Flush queued control in order. The hybrid forwards voipInit(myDeviceJid,myUserJid,selfLidDeviceJid)
-      // — the real identity strings the engine needs to BUILD accept stanzas (a logged-out engine has no
-      // self JID otherwise, so acceptCall emits nothing). Use it; fall back to no-args only if none came.
+      // The engine's own WA app drives voipInit with its real device identity — we don't init it.
       for (const [mm, a] of pendingControl.splice(0)) call(mm, a);
-      if (!voipInited) { try { (stack.voipInit as (() => unknown) | undefined)?.(); voipInited = true; p.log('voipInit() self-init (no forwarded identity)'); } catch (e) { p.log('voipInit threw: ' + String(e)); } }
     };
 
     // Instantiate via the dispatcher singleton. createWAWebVoipStackInterface takes no delegate; the
@@ -263,6 +267,37 @@ contextBridge.executeInMainWorld({
       });
     };
 
+    // Diagnostics: the live gatekeeper/environment state that decides which voip stack loads.
+    // cr:22885 (gk 22885) picks WAWebVoipStackInterfaceWeb (type:"web", has acceptCall) vs
+    // ...Windows (type:"windows", the stub). gkx has no runtime overwrite, so we read, not flip.
+    const dumpDiag = (rl: RL) => {
+      rl(['gkx', 'WAWebEnvironment', 'WAWebVoipGatingUtils'], (gkxMod, envMod, gateMod) => {
+        const gkx = gkxMod as ((id: string) => unknown) | null;
+        const env = envMod as Record<string, unknown> | null;
+        const gate = gateMod as Record<string, () => unknown> | null;
+        const g = (id: string) => { try { return gkx ? gkx(id) : 'no-gkx'; } catch { return 'threw'; } };
+        const ge = (fn: string) => { try { return gate && typeof gate[fn] === 'function' ? gate[fn]() : 'n/a'; } catch (e) { return 'threw:' + String(e); } };
+        let sub: unknown = 'n/a';
+        try { sub = env && typeof env.getSubPlatform === 'function' ? (env.getSubPlatform as () => unknown)() : 'n/a'; } catch { /* getter threw */ }
+        p.log('DIAG gk4112=' + JSON.stringify(g('4112')) + ' gk22885=' + JSON.stringify(g('22885'))
+          + ' isWindows=' + String(env?.isWindows) + ' subPlatform=' + JSON.stringify(sub)
+          + ' isCallingEnabled=' + JSON.stringify(ge('isCallingEnabled')) + ' isVoipDownloadEnabled=' + JSON.stringify(ge('isVoipDownloadEnabled')));
+      });
+    };
+
+    // Make the engine a consistent web client for any code that reads the isWindows PROPERTY.
+    // getSubPlatform reads a closure var we can't un-cache, so we replace the property fn too.
+    const forceWebEnvironment = (rl: RL) => {
+      rl(['WAWebEnvironment'], (envMod) => {
+        const env = envMod as Record<string, unknown> | null;
+        if (!env) { p.log('WAWebEnvironment missing'); return; }
+        if (env.isWindows === true) {
+          try { env.isWindows = false; env.isWeb = true; env.getSubPlatform = () => 'web'; p.log('forced WAWebEnvironment → web (was windows)'); }
+          catch (e) { p.log('env override threw: ' + String(e)); }
+        } else { p.log('WAWebEnvironment.isWindows=' + String(env.isWindows)); }
+      });
+    };
+
     // Load the voip stack via the dispatcher. The concrete WAWebVoipStackInterfaceWeb name won't
     // resolve until the dispatcher pulls its chunk, so load the dispatcher and retry until it fires.
     let voipLoaded = false;
@@ -279,6 +314,56 @@ contextBridge.executeInMainWorld({
       setTimeout(() => { if (!voipLoaded) loadVoip(rl); }, 5000);
     };
 
+    // Hook the engine's REAL call-event funnel. The engine is a full web client, so its WASM fires
+    // handleWAWebVoipNativeCallEvent(eventType, eventDataJson) for every real state change
+    // (ReceivedCall→AcceptSent→CallActive(6)→None) as the engine's own UI updates. We can't relay
+    // the raw web-format event to the hybrid (its windows parser would choke), so we read the real
+    // CallState and re-drive the hybrid puppet through synthesizeCallState (clean windows format).
+    // This advances the hybrid past "Connecting" to in-call, and dismisses it on the real call end.
+    let nativeHooked = false;
+    let nativeHookTries = 0;
+    const hookEngineNativeEvents = (rl: RL) => {
+      if (nativeHooked) return;
+      rl(['WAWebVoipHandleNativeCallEvent'], (mod) => {
+        const H = mod as Record<string, unknown> | null;
+        if (!H || typeof H.handleWAWebVoipNativeCallEvent !== 'function') {
+          if (++nativeHookTries < 20) setTimeout(() => hookEngineNativeEvents(rl), 1500);
+          return;
+        }
+        if (nativeHooked) return;
+        nativeHooked = true;
+        const orig = H.handleWAWebVoipNativeCallEvent as (...a: unknown[]) => unknown;
+        H.handleWAWebVoipNativeCallEvent = (et: unknown, json: unknown, ...rest: unknown[]) => {
+          try {
+            let data: Record<string, unknown> | null = null;
+            try { data = typeof json === 'string' ? JSON.parse(json) : (json as Record<string, unknown>); } catch { /* not json */ }
+            const cs = data ? (data.CallState ?? data.callState ?? data.state) : undefined;
+            p.log('REAL native-event et=' + String(et) + ' callState=' + JSON.stringify(cs) + ' data=' + (typeof json === 'string' ? json : JSON.stringify(json ?? '')).slice(0, 280));
+            // Drive the hybrid puppet to the engine's REAL state (6=CallActive/in-call, 0=ended).
+            if (typeof cs === 'number' && activeRing) synthesizeCallState(cs, 'real-event');
+          } catch (e) { p.log('engine native-event hook err: ' + String(e)); }
+          return orig(et, json, ...rest);
+        };
+        p.log('engine handleWAWebVoipNativeCallEvent hooked');
+      });
+    };
+
+    // Poll WA's logged-in user so main can show the engine for QR pairing (logged-out) or hide it
+    // once paired (logged-in). getMaybeMe{Pn,Lid}User return the self user only when logged in.
+    const watchLoginState = (rl: RL) => {
+      let last: boolean | null = null;
+      const tick = () => {
+        rl(['WAWebUserPrefsMeUser'], (mod) => {
+          const m = mod as Record<string, () => unknown> | null;
+          let loggedIn = false;
+          try { loggedIn = !!((m?.getMaybeMePnUser?.()) || (m?.getMaybeMeLidUser?.())); } catch { loggedIn = false; }
+          if (loggedIn !== last) { last = loggedIn; p.loginState(loggedIn); p.log('login-state: ' + loggedIn); }
+        });
+        setTimeout(tick, 1500);
+      };
+      tick();
+    };
+
     const init = () => {
       const rl = getRequireLazy();
       if (!rl) { if (++initTries % 5 === 0) p.log('waiting for requireLazy... ' + initTries + 's'); setTimeout(init, 1000); return; }
@@ -286,21 +371,32 @@ contextBridge.executeInMainWorld({
       p.log('requireLazy ready; coI=' + String(wd.crossOriginIsolated) + ' SAB=' + (typeof SharedArrayBuffer));
       patchOutboundSignaling(rl);
       forceCalling(rl);
+      forceWebEnvironment(rl);
+      watchLoginState(rl);
       loadWapModules(rl);
-      setTimeout(() => { readGating(rl); loadVoip(rl); }, 1200);
+      setTimeout(() => { dumpDiag(rl); readGating(rl); loadVoip(rl); hookEngineNativeEvents(rl); }, 1200);
     };
 
+    // The engine is its OWN logged-in device: its WA app inits voip with the engine's real device
+    // identity and processes its own offers/signaling natively. Only the hybrid's call-control
+    // BUTTONS act on the engine's active call — forwarded voipInit/identity/offers carry the
+    // HYBRID device's state and would corrupt the engine, so ignore everything else.
+    const ENGINE_CONTROLS = new Set(['acceptCall', 'rejectCall', 'endCall', 'setCallMute', 'rejectCallWithoutCallContext']);
     const call = (method: string, args: unknown[]) => {
+      if (!ENGINE_CONTROLS.has(method)) { p.log('control ignored (engine self-driven): ' + method); return; }
       if (!stack) { pendingControl.push([method, args]); p.log('queued (stack not ready): ' + method); return; }
-      if (method === 'voipInit') { if (voipInited) { p.log('voipInit already done, skipping dup'); return; } voipInited = true; p.log('voipInit with identity args=' + args.length); }
       const fn = stack[method];
       if (typeof fn !== 'function') { p.log('control: not a fn: ' + method); return; }
-      try { (fn as (...a: unknown[]) => unknown).apply(stack, args); p.log('control ' + method + ' applied'); }
+      // Diagnostic: does the engine actually have its own incoming call to act on? (It's a separate
+      // device — acceptCall is a no-op if the call never fanned out to it.)
+      try { const ci = (stack.getCallInfo as ((...a: unknown[]) => unknown) | undefined)?.(); p.log(method + ' getCallInfo=' + JSON.stringify(ci)); } catch (e) { p.log(method + ' getCallInfo threw: ' + String(e)); }
+      try { const r = (fn as (...a: unknown[]) => unknown).apply(stack, args); p.log('control ' + method + ' applied -> ' + JSON.stringify(r)); }
       catch (e) { p.log('control ' + method + ' threw: ' + String(e)); }
-      // Drive the hybrid call UI off our local control (engine onCallEvent is worker-sealed):
-      // accept → AcceptSent("Connecting"); local reject/end → None(dismiss).
-      if (method === 'acceptCall') synthesizeCallState(4, 'accepted');
-      else if (method === 'rejectCall' || method === 'endCall' || method === 'rejectCallWithoutCallContext') synthesizeCallState(0, 'local end');
+      // Drive the hybrid's puppet call UI (the engine's real call events are worker-sealed):
+      // accept → Connecting/in-call (and own the call so accepted-elsewhere can't dismiss it);
+      // local reject/end → None (dismiss).
+      if (method === 'acceptCall') { acceptedLocally = true; synthesizeCallState(4, 'accepted'); }
+      else if (method === 'rejectCall' || method === 'endCall' || method === 'rejectCallWithoutCallContext') { acceptedLocally = false; synthesizeCallState(0, 'local end'); }
     };
 
     // Inbound signaling: decode base64 → node wrapper, THEN call the stack (async decode).
@@ -313,7 +409,10 @@ contextBridge.executeInMainWorld({
         p.log(method + ': decoded ok (tag=' + JSON.stringify(tag) + '), applying to stack=' + (!!stack));
         if (ringPeerJid) { try { synthesizeRing(wrapped.node(), ringPeerJid); } catch (e) { p.log('ring synth failed: ' + String(e)); } }
         // Teardown: a terminate/reject node for the active call → dismiss the hybrid call UI (CallState=None).
-        else if (typeof tag === 'string' && /^(terminate|reject)$/.test(tag)) { try { synthesizeCallState(0, tag); } catch (e) { p.log('teardown synth failed: ' + String(e)); } }
+        else if (typeof tag === 'string' && /^(terminate|reject)$/.test(tag)) {
+          if (acceptedLocally) { p.log('teardown ' + tag + ' ignored (engine owns the accepted call)'); }
+          else { try { synthesizeCallState(0, tag); } catch (e) { p.log('teardown synth failed: ' + String(e)); } }
+        }
         call(method, [wrapped, ...rest]);
       }
       catch (e) { p.log(method + ' wrap/decode failed: ' + String(e)); }

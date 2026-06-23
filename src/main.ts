@@ -48,8 +48,11 @@ const CALL_MODE = process.env.WA_CALL_MODE === '1';
 // signaling is relayed back through the hybrid VoipBridge subscribe sink and sent on the hybrid
 // socket. See src/engine-window.ts. Distinct from CALL_MODE (the plain-web-only calling build).
 const HYBRID_CALLS = process.env.WA_HYBRID_CALLS === '1' && !CALL_MODE;
+// WA_ENGINE_ONLY=1: launch ONLY the engine window (a standalone logged-in web device), no hybrid.
+// The engine's own WASM voip needs the same SharedArrayBuffer + mic switches as the calling builds.
+const ENGINE_ONLY = process.env.WA_ENGINE_ONLY === '1';
 
-if (CALL_MODE || HYBRID_CALLS) {
+if (CALL_MODE || HYBRID_CALLS || ENGINE_ONLY) {
   if (CALL_MODE) app.setPath('userData', path.join(app.getPath('appData'), 'whatswine-call'));
   // The plain-web voip context (CALL_MODE page, or the hidden engine window) needs SharedArrayBuffer
   // (WASM voip gate) and a working mic. We do NOT force COOP — WhatsApp serves its own COOP/COEP, and
@@ -57,6 +60,13 @@ if (CALL_MODE || HYBRID_CALLS) {
   // sandbox blocks the mic (silent getUserMedia, electron#23792), so disable it.
   app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
   app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
+  // The engine window is minimized once paired (the only reliable hide on Linux). Stop Chromium
+  // from suspending its renderer when minimized/occluded, else it stops servicing its socket and
+  // calls never arrive. backgroundThrottling:false on the window covers timers; these cover the
+  // renderer-priority + occlusion paths.
+  app.commandLine.appendSwitch('disable-renderer-backgrounding');
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows');
+  app.commandLine.appendSwitch('disable-background-timer-throttling');
 }
 
 function buildUrl(): string {
