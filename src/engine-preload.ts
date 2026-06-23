@@ -175,6 +175,7 @@ contextBridge.executeInMainWorld({
           cbs.__waHooked = true;
           const orig = cbs.onCallEvent.bind(cbs);
           cbs.onCallEvent = (t) => {
+            p.log('onCallEvent fired: type=' + String(t?.eventType));
             try { p.nativeEvent(t?.eventType, t?.eventDataJson); } catch (e) { p.log('nativeEvent relay err ' + String(e)); }
             return orig(t);
           };
@@ -285,7 +286,13 @@ contextBridge.executeInMainWorld({
 
     // Inbound signaling: decode base64 → node wrapper, THEN call the stack (async decode).
     const callWithWrappedNode = async (method: string, b64Str: string, rest: unknown[]) => {
-      try { call(method, [await wrapNode(b64Str), ...rest]); }
+      try {
+        const wrapped = await wrapNode(b64Str);
+        let tag: unknown = '?';
+        try { const nn = wrapped.node() as { tag?: unknown }; tag = nn?.tag ?? Object.keys(nn ?? {}); } catch { /* ignore */ }
+        p.log(method + ': decoded ok (tag=' + JSON.stringify(tag) + '), applying to stack=' + (!!stack));
+        call(method, [wrapped, ...rest]);
+      }
       catch (e) { p.log(method + ' wrap/decode failed: ' + String(e)); }
     };
 
