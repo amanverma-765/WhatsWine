@@ -73,7 +73,7 @@ const CALL_SHIMS_JS = `(() => {
   }
   const req = window.requireLazy;
   if (!req) return;
-  const FORCE = { enable_web_calling: true, enable_web_group_calling: true, enable_web_voip_proxy_and_sctp_workers: false, web_voip_sctp_worker_safari_exp: false };
+  const FORCE = { enable_web_calling: true, enable_web_group_calling: true };
   let tries = 0;
   const tick = () => {
     try {
