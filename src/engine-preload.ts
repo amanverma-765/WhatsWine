@@ -133,10 +133,24 @@ contextBridge.executeInMainWorld({
       });
     };
     const passthroughInflate = (e: unknown) => Promise.resolve(e);
+    const toU8 = (v: unknown): Uint8Array => {
+      if (v instanceof Uint8Array) return v;
+      if (v instanceof ArrayBuffer) return new Uint8Array(v);
+      if (ArrayBuffer.isView(v)) { const a = v as ArrayBufferView; return new Uint8Array(a.buffer, a.byteOffset, a.byteLength); }
+      if (Array.isArray(v)) return Uint8Array.from(v as number[]);
+      throw new Error('decodeB64 returned unexpected type ' + Object.prototype.toString.call(v));
+    };
     // base64 string → { node: () => parsedNode }. Async because decodeStanza is async.
+    // The ?windows=1 producer (WAWebSerializeVoipWapNode.serializeVoipWapNode) encodes the node via
+    // WAWap.encodeStanza then STRIPS the leading framing/compression flag byte (readUint8) before
+    // base64. decodeStanza expects that flag, so re-prepend 0 (uncompressed) before decoding.
     const wrapNode = async (b64Str: string): Promise<{ node: () => unknown }> => {
       if (!wap || !b64) throw new Error('WAWap/WABase64 not loaded yet');
-      const node = await wap.decodeStanza(b64.decodeB64(b64Str), passthroughInflate);
+      const body = toU8(b64.decodeB64(b64Str));
+      const framed = new Uint8Array(body.length + 1);
+      framed[0] = 0;
+      framed.set(body, 1);
+      const node = await wap.decodeStanza(framed, passthroughInflate);
       return { node: () => node };
     };
 
