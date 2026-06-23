@@ -251,6 +251,9 @@ contextBridge.executeInMainWorld({
         const FORCE: Record<string, boolean> = {
           enable_web_calling: true, enable_web_group_calling: true,
           web_calling_download_voip: true, web_calling_init_voip: true,
+          // Avoid the dedicated voip Worker (createWorkerProxyStackInterface) so the WASM's outbound
+          // signaling (WAWebVoipSendSignalingXmpp) runs where our main-world patch can capture it.
+          enable_web_voip_proxy_and_sctp_workers: false, web_voip_sctp_worker_safari_exp: false,
         };
         const origAb = typeof AB.getABPropConfigValue === 'function' ? (AB.getABPropConfigValue as (k: string) => unknown).bind(AB) : null;
         let inHook = false;
