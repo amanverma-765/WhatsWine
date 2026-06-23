@@ -39,6 +39,15 @@ export function setOutboundRelay(fn: (method: string, args: unknown[]) => void):
 let nativeEventRelay: ((eventType: unknown, eventDataJson: unknown) => void) | null = null;
 export function setNativeEventRelay(fn: (eventType: unknown, eventDataJson: unknown) => void): void { nativeEventRelay = fn; }
 
+// Generic IVoipBridgeToWeb event dispatch: fire any "<method>Event" on the hybrid's VoipBridge host
+// object (the EventTarget surface the bundle subscribes to). Registered by main.ts.
+let bridgeEventSender: ((eventName: string, payload: unknown) => void) | null = null;
+export function setBridgeEventSender(fn: (eventName: string, payload: unknown) => void): void { bridgeEventSender = fn; }
+export function dispatchVoipBridgeEvent(eventName: string, payload: unknown): void {
+  if (bridgeEventSender) bridgeEventSender(eventName, payload);
+  else console.warn('[engine] bridge event before sender registered:', eventName);
+}
+
 function engineSend(channel: string, ...payload: unknown[]): void {
   if (engineWindow && !engineWindow.isDestroyed()) engineWindow.webContents.send(channel, ...payload);
 }

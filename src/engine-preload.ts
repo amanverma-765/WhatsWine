@@ -68,22 +68,20 @@ contextBridge.executeInMainWorld({
     };
 
     // Convert a serialized byte-map {0:n,1:n,…} (or array/Uint8Array) → base64 string.
-    const toB64 = (v: unknown): unknown => {
-      if (v == null) return v;
-      let bytes: number[] | null = null;
-      if (Array.isArray(v)) bytes = v as number[];
-      else if (v instanceof Uint8Array) bytes = Array.from(v);
-      else if (typeof v === 'object') {
+    const toBytes = (v: unknown): number[] | null => {
+      if (v == null) return null;
+      if (Array.isArray(v)) return v as number[];
+      if (v instanceof Uint8Array) return Array.from(v);
+      if (typeof v === 'object') {
         const o = v as Record<string, unknown>;
         const keys = Object.keys(o);
-        if (keys.length && keys.every(k => /^\d+$/.test(k))) {
-          bytes = keys.map(Number).sort((a, b) => a - b).map(k => Number(o[String(k)]));
-        }
+        if (keys.length && keys.every(k => /^\d+$/.test(k))) return keys.map(Number).sort((a, b) => a - b).map(k => Number(o[String(k)]));
       }
-      if (!bytes) return v;
-      let s = '';
-      for (const b of bytes) s += String.fromCharCode(b & 0xff);
-      try { return btoa(s); } catch { return v; }
+      return null;
+    };
+    const bytesToB64 = (bytes: number[]): string => {
+      let s = ''; for (const b of bytes) s += String.fromCharCode(b & 0xff);
+      return btoa(s);
     };
 
     // The engine's outbound signaling node → the bridge ToWeb `handleSignalingXmpp` shape.
@@ -91,12 +89,14 @@ contextBridge.executeInMainWorld({
     // logged-in keys. shouldEncrypt defaults true (offer/enc_rekey); revisit if rekey/ack need false.
     const relaySignaling = (rawArg: unknown) => {
       const a = (rawArg && typeof rawArg === 'object') ? rawArg as Record<string, unknown> : {};
+      const bytes = toBytes(a.xmlPayload ?? a.xmlPayloadBase64);
+      let payload: unknown = a.xmlPayload ?? a.xmlPayloadBase64;
+      if (bytes) { try { payload = bytesToB64(bytes.slice(1)); } catch { /* keep raw */ } }
       p.out('handleSignalingXmpp', [{
         peerJid: a.peerJid,
         callId: a.callId,
-        xmlPayloadBase64: toB64(a.xmlPayload ?? a.xmlPayloadBase64),
-        shouldEncrypt: a.shouldEncrypt ?? true,
-        raw: a,
+        payload,
+        shouldEncryptBeforeSending: a.shouldEncrypt ?? true,
       }]);
     };
 
@@ -187,8 +187,19 @@ contextBridge.executeInMainWorld({
         CreatorJid: { str: creator }, PeerJid: peerJid, InitialPeerJid: peerJid,
         VideoEnabled: hasVideo, IsGroupCall: false, IsJoinableCall: false, IsLightweight: false,
       };
+      activeRing = ring;
       p.log('synthesized ring: ' + JSON.stringify(ring));
       p.nativeEvent(16, JSON.stringify(ring));
+    };
+    // Track the active call so we can synthesize state transitions (the engine's onCallEvent is
+    // worker-sealed). Re-emit CallStateChanged with a new CallState using the same call_info fields.
+    let activeRing: { CallState: number } & Record<string, unknown> | null = null;
+    const synthesizeCallState = (state: number, why: string) => {
+      if (!activeRing) return;
+      const ev = { ...activeRing, CallState: state };
+      p.log('synthesized callState=' + state + ' (' + why + ')');
+      p.nativeEvent(16, JSON.stringify(ev));
+      if (state === 0) activeRing = null;   // None → call cleared
     };
 
     const methodNames = (obj: unknown): string[] => {
@@ -297,6 +308,8 @@ contextBridge.executeInMainWorld({
         try { const nn = wrapped.node() as { tag?: unknown }; tag = nn?.tag ?? Object.keys(nn ?? {}); } catch { /* ignore */ }
         p.log(method + ': decoded ok (tag=' + JSON.stringify(tag) + '), applying to stack=' + (!!stack));
         if (ringPeerJid) { try { synthesizeRing(wrapped.node(), ringPeerJid); } catch (e) { p.log('ring synth failed: ' + String(e)); } }
+        // Teardown: a terminate/reject node for the active call → dismiss the hybrid call UI (CallState=None).
+        else if (typeof tag === 'string' && /^(terminate|reject)$/.test(tag)) { try { synthesizeCallState(0, tag); } catch (e) { p.log('teardown synth failed: ' + String(e)); } }
         call(method, [wrapped, ...rest]);
       }
       catch (e) { p.log(method + ' wrap/decode failed: ' + String(e)); }

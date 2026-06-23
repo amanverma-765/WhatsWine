@@ -7,7 +7,7 @@ import { installSoundPlayer } from './sound';
 import { installRingtone } from './ringtone';
 import { showMainWindow } from './window';
 import { installBridges } from './bridge/registry';
-import { createEngineWindow, setNativeEventRelay } from './engine-window';
+import { createEngineWindow, setNativeEventRelay, setBridgeEventSender } from './engine-window';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
@@ -448,6 +448,9 @@ app.on('ready', () => {
   // Hybrid-calls: create the hidden engine window AFTER installBridges() — voip.ts registers the
   // outbound relay during installBridges(), which the engine window needs before it emits.
   if (HYBRID_CALLS) {
+    // Fire any IVoipBridgeToWeb "<method>Event" on the hybrid's VoipBridge host object.
+    setBridgeEventSender((eventName, payload) =>
+      mainWindow?.webContents.send('wa-bridge:event', 'VoipBridge', eventName, payload));
     // The engine emits {eventType, eventDataJson}; deliver it as a VoipBridge "handleVoipCallEvent"
     // (the IVoipBridgeToWeb EventTarget surface the bundle subscribes to) so the call UI rings.
     setNativeEventRelay((eventType, eventDataJson) =>

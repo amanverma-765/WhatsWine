@@ -33,6 +33,7 @@ import {
   pushSignalingToEngine,
   pushAckToEngine,
   engineControl,
+  dispatchVoipBridgeEvent,
 } from '../../engine-window';
 
 // ─── Ringtone control ────────────────────────────────────────────────────────
@@ -131,7 +132,11 @@ const sharedTw = toWeb();
 // emits (intercepted in engine-preload.ts) is forwarded back to the hybrid page's
 // subscribe sink as if it came from a native engine. No-op when the engine window
 // is not created (WA_ENGINE_MODE not set).
-setOutboundRelay((method, args) => sharedTw.call(method, ...args));
+// The bundle subscribes to IVoipBridgeToWeb events via the host-object EventTarget surface
+// (addEventListener("<method>Event")), not the legacy subscribe-sink. Deliver the engine's outbound
+// emissions as the matching "<method>Event" so they reach the bundle (e.g. handleSignalingXmppEvent
+// makes the hybrid wrap+encrypt+send the engine's signaling on its socket).
+setOutboundRelay((method, args) => dispatchVoipBridgeEvent(method + 'Event', args[0]));
 
 // ─────────────────────────────────────────────────────────────────────────────
 // VoipBridge
@@ -158,7 +163,21 @@ function voipBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactory> {
       // Drive the headless engine's voipInit with the real identity JIDs; it will emit
       // handleVoipReady back through the relay. Keep an immediate emit as a stall guard.
       engineControl('voipInit', [myDeviceJid, myUserJid, selfLidDeviceJid]);
-      sharedTw.call('handleVoipReady');
+      dispatchVoipBridgeEvent('handleVoipReadyEvent', {});
+    },
+
+    // ── Call accept/reject (NOT on the native windows stub — we add them) ──
+    // The web call UI calls getVoipStackInterface().acceptCall(...), which the windows stub lacks; we
+    // patch the stub (preload) to forward here, and drive the hidden WASM engine's acceptCall. The
+    // engine transitions ReceivedCall→AcceptSent and emits the accept signaling (relayed back out).
+    acceptCall: (...args: unknown[]) => {
+      ctx.log('[VoipBridge] acceptCall', ...args);
+      engineControl('acceptCall', args);
+    },
+    rejectCall: (...args: unknown[]) => {
+      stopRing();
+      ctx.log('[VoipBridge] rejectCall', ...args);
+      engineControl('rejectCall', args);
     },
 
     // ── FUNCTIONAL: JID-resolution reply handlers ─────────────────────────

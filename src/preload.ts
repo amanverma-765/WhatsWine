@@ -192,6 +192,44 @@ contextBridge.executeInMainWorld({
         try { fn(); console.log('[wabridge] setupVoipActiveCallChangeListener enabled (call popout)'); }
         catch (e) { console.log('[wabridge] setupVoipActiveCallChangeListener threw: ' + String(e)); }
       });
+      // Wrap getVoipStackInterface() so the windows stub gains the control methods the web call UI
+      // needs (`acceptCall`/`rejectCall` — the stub lacks them; native Windows accepts natively). They
+      // forward to our VoipBridge host object → engine. Also log other control-method calls to discover
+      // exactly what Accept/Decline invoke.
+      rl(['WAWebVoipStackInterface'], (SI) => {
+        const si = SI as Record<string, unknown> | null;
+        const orig = si?.getVoipStackInterface as ((...a: unknown[]) => unknown) | undefined;
+        if (!si || typeof orig !== 'function' || (orig as { __waWrapped?: boolean }).__waWrapped) return;
+        const voip = () => (w.chrome?.webview?.hostObjects as Record<string, Record<string, (...a: unknown[]) => unknown>>).VoipBridge;
+        const CONTROL = /^(acceptCall|rejectCall|endCall|rejectCallWithoutCallContext|startCall|setCallMute|setCallVideoMute)$/;
+        let proxy: unknown = null;
+        const makeProxy = (stub: unknown) => {
+          if (!stub || typeof stub !== 'object') return stub;
+          if (proxy) return proxy;
+          proxy = new Proxy(stub as Record<string, unknown>, {
+            get(t, prop) {
+              const key = String(prop);
+              const v = (t as Record<string, unknown>)[key];
+              if ((key === 'acceptCall' || key === 'rejectCall') && typeof v !== 'function') {
+                return (...args: unknown[]) => { console.log('[wabridge] stub.' + key + ' (injected→bridge) args=' + args.length); return voip()[key](...args); };
+              }
+              if (typeof v === 'function' && CONTROL.test(key)) {
+                return (...args: unknown[]) => { console.log('[wabridge] stub.' + key + ' called args=' + args.length); return (v as (...a: unknown[]) => unknown).apply(t, args); };
+              }
+              return v;
+            },
+          });
+          return proxy;
+        };
+        const wrapped = (...a: unknown[]) => {
+          const r = orig(...a);
+          if (r && typeof (r as { then?: unknown }).then === 'function') return (r as Promise<unknown>).then(makeProxy);
+          return makeProxy(r);
+        };
+        (wrapped as { __waWrapped?: boolean }).__waWrapped = true;
+        si.getVoipStackInterface = wrapped;
+        console.log('[wabridge] getVoipStackInterface wrapped (inject acceptCall/rejectCall + log control)');
+      });
     };
     hookHybridDispatch();
 
