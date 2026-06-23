@@ -33,6 +33,35 @@ contextBridge.executeInMainWorld({
     const getRequireLazy = (): ((mods: string[], cb: (m: unknown) => void) => void) | null =>
       (window as unknown as { requireLazy?: (m: string[], cb: (x: unknown) => void) => void }).requireLazy ?? null;
 
+    // Surface the bundle's real boot errors — Electron's console-message renders WA's Error
+    // objects as "[object Object]", hiding the cause of a stalled voip-module registration.
+    const errSeen = new Set<string>();
+    const reportErr = (tag: string, e: unknown) => {
+      const err = e as { stack?: string; message?: string } | undefined;
+      const s = (err?.stack || err?.message || String(e) || '').slice(0, 600);
+      if (errSeen.has(s)) return; errSeen.add(s);
+      p.log(tag + ': ' + s);
+    };
+    window.addEventListener('error', (ev) => reportErr('PAGE-ERROR', (ev as ErrorEvent).error ?? (ev as ErrorEvent).message));
+    window.addEventListener('unhandledrejection', (ev) => reportErr('PAGE-REJECT', (ev as PromiseRejectionEvent).reason));
+
+    // Read back the voip gating flags (matches the proven pathb-smoke GATING probe). If
+    // isVoipDownloadEnabled is false here, the bundle won't register the voip chunk → requireLazy
+    // hangs forever. This tells us whether the AB-prop force actually took effect in time.
+    const readGating = (rl: RL) => {
+      rl(['WAWebVoipGatingUtils'], (mod) => {
+        const g = mod as Record<string, () => unknown> | null;
+        if (!g) { p.log('GATING: WAWebVoipGatingUtils resolved null'); return; }
+        const safe = (fn: string) => { try { return typeof g[fn] === 'function' ? g[fn]() : 'n/a'; } catch (e) { return 'threw:' + String(e); } };
+        p.log('GATING ' + JSON.stringify({
+          isCallingEnabled: safe('isCallingEnabled'),
+          isVoipDownloadEnabled: safe('isVoipDownloadEnabled'),
+          isVoipInitEnabled: safe('isVoipInitEnabled'),
+          unsupportedReason: safe('unsupportedReason'),
+        }));
+      });
+    };
+
     // Convert a serialized byte-map {0:n,1:n,…} (or array/Uint8Array) → base64 string.
     const toB64 = (v: unknown): unknown => {
       if (v == null) return v;
@@ -142,7 +171,7 @@ contextBridge.executeInMainWorld({
     let voipTries = 0;
     const loadVoip = (rl: RL) => {
       if (voipLoaded) return;
-      if (++voipTries > 10) { p.log('voip module never loaded after 10 tries (~50s)'); return; }
+      if (++voipTries > 10) { p.log('voip module never loaded after 10 tries (~50s)'); readGating(rl); return; }
       rl(['WAWebVoipStackInterfaceWeb'], (mod) => {
         if (voipLoaded) return;
         voipLoaded = true;
@@ -159,7 +188,7 @@ contextBridge.executeInMainWorld({
       p.log('requireLazy ready; coI=' + String(w.crossOriginIsolated) + ' SAB=' + (typeof SharedArrayBuffer));
       patchOutboundSignaling(rl);
       forceCalling(rl);
-      setTimeout(() => loadVoip(rl), 1200);   // let the force settle before the first load attempt
+      setTimeout(() => { readGating(rl); loadVoip(rl); }, 1200);   // read gating, then load (force settled)
     };
 
     const call = (method: string, args: unknown[]) => {
