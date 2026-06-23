@@ -295,8 +295,12 @@ contextBridge.executeInMainWorld({
       if (!stack) { pendingControl.push([method, args]); p.log('queued (stack not ready): ' + method); return; }
       const fn = stack[method];
       if (typeof fn !== 'function') { p.log('control: not a fn: ' + method); return; }
-      try { (fn as (...a: unknown[]) => unknown).apply(stack, args); }
+      try { (fn as (...a: unknown[]) => unknown).apply(stack, args); p.log('control ' + method + ' applied'); }
       catch (e) { p.log('control ' + method + ' threw: ' + String(e)); }
+      // Drive the hybrid call UI off our local control (engine onCallEvent is worker-sealed):
+      // accept → AcceptSent("Connecting"); local reject/end → None(dismiss).
+      if (method === 'acceptCall') synthesizeCallState(4, 'accepted');
+      else if (method === 'rejectCall' || method === 'endCall' || method === 'rejectCallWithoutCallContext') synthesizeCallState(0, 'local end');
     };
 
     // Inbound signaling: decode base64 → node wrapper, THEN call the stack (async decode).
