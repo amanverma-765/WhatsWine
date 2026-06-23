@@ -97,6 +97,7 @@ contextBridge.executeInMainWorld({
     });
 
     let stack: Stack | null = null;
+    let initTries = 0;
     // Anything (voipInit, offers, JID answers) can arrive from the hybrid before the stack is
     // instantiated (~3s after load). Queue and flush in order on ready — dropping voipInit would
     // leave the engine uninitialized and offers would fail.
@@ -104,9 +105,15 @@ contextBridge.executeInMainWorld({
 
     const init = () => {
       const rl = getRequireLazy();
-      if (!rl) { setTimeout(init, 1000); return; }
+      if (!rl) { if (++initTries % 5 === 0) p.log('waiting for requireLazy... ' + initTries + 's'); setTimeout(init, 1000); return; }
+      const w = window as unknown as { crossOriginIsolated?: boolean };
+      p.log('requireLazy ready; coI=' + String(w.crossOriginIsolated) + ' SAB=' + (typeof SharedArrayBuffer));
       patchOutboundSignaling(rl);
+      let voipLoaded = false;
+      setTimeout(() => { if (!voipLoaded) p.log('WAWebVoipStackInterfaceWeb load TIMEOUT (20s) — chunk not fetching/registered'); }, 20000);
       rl(['WAWebVoipStackInterfaceWeb'], (mod) => {
+        voipLoaded = true;
+        p.log('WAWebVoipStackInterfaceWeb loaded');
         const m = mod as Record<string, unknown> | null;
         if (!m || typeof m.createWAWebVoipStackInterface !== 'function') {
           p.log('WAWebVoipStackInterfaceWeb / factory missing'); return;
