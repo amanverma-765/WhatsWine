@@ -162,13 +162,17 @@ contextBridge.executeInMainWorld({
       // (this is what actually drives the ring). Filter to call-related messages.
       rl(['WAWebBackendApi'], (B) => {
         const api = B as Record<string, unknown> | null;
-        const orig = api?.frontendFireAndForget as ((n: string, p: unknown) => unknown) | undefined;
-        if (!api || typeof orig !== 'function') return;
-        api.frontendFireAndForget = (name: string, payload: unknown) => {
-          if (/call/i.test(name)) console.log('[wabridge] FFAF ' + name + ' ' + JSON.stringify(payload).slice(0, 300));
-          return orig.call(api, name, payload);
-        };
-        console.log('[wabridge] frontendFireAndForget hooked');
+        if (!api) return;
+        const VOIP = /call|accept|answer|reject|decline|end|voip|hangup|terminate/i;
+        for (const fn of ['frontendFireAndForget', 'frontendSendAndReceive']) {
+          const orig = api[fn] as ((n: string, p: unknown) => unknown) | undefined;
+          if (typeof orig !== 'function') continue;
+          api[fn] = (name: string, payload: unknown) => {
+            if (VOIP.test(name)) console.log('[wabridge] ' + fn + ' ' + name + ' ' + JSON.stringify(payload).slice(0, 200));
+            return orig.call(api, name, payload);
+          };
+        }
+        console.log('[wabridge] backend API hooked (FFAF + FSAR)');
       });
       // Does the call model reach the FRONTEND call collection (what the UI observes), or only the
       // backend? Hook setActiveCall in this frontend world.

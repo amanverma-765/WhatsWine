@@ -349,9 +349,14 @@ const createWindow = () => {
   if (CALL_MODE) installCallShims(wc);
   if (CALL_MODE || HYBRID_CALLS) {
     wc.on('did-create-window', (win) => {
+      console.log('[hybrid] call popout window created:', win.webContents.getURL());
       // The call popout is a separate webContents (allowed above) — give it the same shims so its
       // mic-permission gate clears and the call button/engine work there too.
       if (CALL_MODE) installCallShims(win.webContents);
+      // Capture the popout's console too — the call UI (and its [wabridge] logs) may live here.
+      if (process.env.WA_BRIDGE_DEBUG) {
+        win.webContents.on('console-message', (_e, level, message) => { if (level >= 1) console.log(`[popout-console:${level}] ${message}`.slice(0, 1200)); });
+      }
       // Auto-close the popout when the call ends. WhatsApp doesn't reliably window.close() it in
       // Electron, so it lingers showing a dark dead call screen. Its title is "WhatsApp call"
       // during the call; once it reverts to the idle "WhatsApp" title, the call is over — close it.
