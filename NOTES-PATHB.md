@@ -199,31 +199,74 @@ WA_ROUNDTRIP=1 WA_ROUNDTRIP_STARTCALL=19195550001@s.whatsapp.net WA_ENGINE_SHOW=
 |-----|---------|
 | `INIT-START` | `p.onRunRoundtrip` triggered; WASM factory loading via requireLazy |
 | `INIT-FAIL` | Module absent or factory threw; check `why` field |
-| `STACK-OK` | Factory returned a non-null instance; `type` field shows the stack variant |
-| `SUBSCRIBE` | `stack.subscribe(sink)` result; `order:before-voipInit` is the happy path |
+| `STACK-OK` | Factory returned a non-null instance; `type` and `factoryChannel` fields |
+| `APPROACH-A` | `WAWebVoipSendSignalingXmpp` patch result; `patchedFns` lists intercepted functions |
+| `APPROACH-B` | Factory-with-delegate-Proxy result; `ok:true` = factory accepted the arg |
+| `APPROACH-C` | Settable own-key slots; `settable:[...]` lists what was assigned |
+| `APPROACH-D` | Proto setter method attempts; `ok:true,method:...` if one worked |
+| `APPROACH-E` | `WADynamicRouterAsync` event-tap result; `patchedFns` lists intercepted functions |
+| `CALL-ENUMS` | `WAWebVoipWaCallEnums.CallState` values — use to decode state numbers in events |
+| `OWN-KEYS-FULL` | All 58 own keys on the factory instance (untruncated) |
+| `PROTO-METHODS-FULL` | All prototype methods with arities (untruncated) |
+| `OUTBOUND-CHANNEL` | Summary of all wired outbound/event mechanisms |
+| `SUBSCRIBE` | `stack.subscribe()` attempt (expected `ok:false` on web stack) |
 | `VOIP-INIT` | `stack.voipInit(placeholderJids)` result |
-| `VOIP-INIT-RETRY` | Retry with subscribe-then-init order (fired if VOIP-INIT failed) |
 | `OFFER-FED` | Real offer from hybrid bridge fed to `stack.handleIncomingSignalingOffer` |
-| `ENGINE-OUTBOUND` | Engine called a method on the subscribe sink (a ToWeb callback fired) |
-| `KEY-CALLBACK` | Engine callback contains key/cipher/ssrc — the engine is demanding crypto material |
+| `OFFER-ENC-ISSUE` | Offer threw with enc/decrypt/key error — hybrid offer may not be decrypted-inlined |
+| `OFFER-ERROR` | Offer threw for a non-enc reason; check `error` field |
+| `ENGINE-EVENT` | Event captured from `WADynamicRouterAsync` (state change, VoipEvent, etc.) |
+| `OFFER-ACCEPTED-BY-ENGINE` | Engine emitted a frontend event after offer was fed — primary success signal |
+| `ACCEPT-CALLING` | About to call `stack.acceptCall()` after 2s settle; logs `engineReacted` status |
+| `ACCEPT-CALLED` | `acceptCall()` result; after this, watch for `ENGINE-OUTBOUND` from Approach A |
+| `ENGINE-OUTBOUND` | Outbound signaling intercepted (from Approach A patch or capProxy) |
+| `KEY-CALLBACK` | Outbound contained key/cipher/ssrc — engine demanding crypto material |
 | `START-CALL` | `stack.startCall()` result (only if `WA_ROUNDTRIP_STARTCALL` was set) |
-| `VERDICT` | Final summary — read this to assess feasibility |
+| `VERDICT` | Final three-way verdict — read this to assess feasibility |
 
 ### How to read the VERDICT
 
 ```json
-{"emittedSignaling": true/false, "callbacks": [...], "keyCallbacks": [...]}
+{
+  "offerAcceptedByEngine": true/false,
+  "emittedSignalingAfterAccept": true/false,
+  "keyCallbacks": [...],
+  "evidence": [...]
+}
 ```
 
-| emittedSignaling | callbacks contain | Interpretation |
-|-----------------|-------------------|----------------|
-| `true` | `handleSignalingXmpp` or `handleVoipCall` | **GREEN** — engine is drivable end-to-end; Option B is feasible |
-| `false` | `requestDeviceJidList`, `requestLidJid` | **YELLOW** — engine is live and making demands; need real JIDs to progress |
-| `false` | `[]` (empty) | **RED-SILENT** — engine accepted offer but did nothing; check `STACK-OK` and `VOIP-INIT` |
-| any | keyCallbacks non-empty | Engine is demanding crypto material; need real session keys to go further |
+| offerAcceptedByEngine | emittedSignalingAfterAccept | Interpretation |
+|----------------------|----------------------------|----------------|
+| `true` | `true` | **GREEN** — full round-trip: engine accepted offer, called acceptCall, emitted outbound stanza. Option B is end-to-end drivable. |
+| `true` | `false` | **YELLOW-PROMISING** — engine reacted to offer (ReceivedCall state); acceptCall didn't elicit stanza yet. Likely needs real session keys or JIDs for Signal encryption of the accept. |
+| `false` | any | **YELLOW-SILENT** — no engine event after offer. Check `APPROACH-E` (did WADynamicRouterAsync load?), `OFFER-ENC-ISSUE` (enc not inlined?), `VOIP-INIT` (did init succeed?). |
+| any | any | `keyCallbacks` non-empty — engine is demanding crypto material; session keys needed. |
 
-The 30 s verdict fires automatically. A `handleSignalingXmpp` callback triggers an early verdict
-(2 s after first firing) so you don't have to wait the full 30 s.
+`evidence` contains the actual `WADynamicRouterAsync` function names and arg previews that fired
+after the offer — paste these in your analysis to identify the exact state transitions.
+
+The 30 s fallback verdict fires automatically. Any `WAWebVoipSendSignalingXmpp` interception
+fires an early verdict (2 s grace).
+
+### Sequence of expected log lines (happy path)
+
+```
+[roundtrip] APPROACH-A {"ok":true,"patchedFns":["sendSignalingXmpp",...]}
+[roundtrip] APPROACH-E {"ok":true,"patchedFns":["frontendSendAndReceive",...]}
+[roundtrip] CALL-ENUMS {"ok":true,"CallState":[["None",0],["Calling",1],...,"ReceivedCall",3],...}
+[roundtrip] STACK-OK {"type":"web","factoryChannel":"arg-less"}
+[roundtrip] OWN-KEYS-FULL {"count":58,"keys":[...]}
+[roundtrip] PROTO-METHODS-FULL {"count":55,"methods":[...]}
+[roundtrip] OUTBOUND-CHANNEL {"found":["A:...","E:...","C:own-slots:..."]}
+[roundtrip] VOIP-INIT {"ok":true}
+... (incoming call arrives) ...
+[roundtrip] OFFER-FED {"peerJid":"..."}
+[roundtrip] ENGINE-EVENT {"name":"frontendSendAndReceive","argsPreview":"...ReceivedCall(3)..."}
+[roundtrip] OFFER-ACCEPTED-BY-ENGINE {"evidence":["frontendSendAndReceive:..."]}
+[roundtrip] ACCEPT-CALLING {"peerJid":"...","engineReacted":true}
+[roundtrip] ACCEPT-CALLED {"threw":false,"peerJid":"..."}
+[roundtrip] ENGINE-OUTBOUND {"method":"WAWebVoipSendSignalingXmpp.sendSignalingXmpp","argsPreview":"..."}
+[roundtrip] VERDICT {"offerAcceptedByEngine":true,"emittedSignalingAfterAccept":true,...}
+```
 
 ### If `INIT-FAIL why:module absent`
 

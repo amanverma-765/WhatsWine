@@ -89,9 +89,13 @@ contextBridge.executeInMainWorld({
 
     // ── Round-trip shared state ───────────────────────────────────────────────
     // Set by p.onRunRoundtrip after the WASM stack factory is called.
-    // Consumed by p.onPushOffer to feed real offers directly to the pre-init stack.
+    // Read/written by p.onPushOffer to feed offers and schedule acceptCall.
     let rtStack: Record<string, unknown> | null = null;
     const rtFiredCallbacks: string[] = [];
+    let rtLastPeerJid: string | null = null;   // peerJid from most-recent real offer
+    let rtOfferFed = false;                     // true once offer was fed to stack
+    let rtEngineReacted = false;                // true once engine emits any event after offer
+    const rtEvidence: string[] = [];            // event names captured after offer
 
     // ── 1. Module probe ────────────────────────────────────────────────────────
     // Runs after a short delay to give the bundle time to initialize its module
@@ -191,15 +195,45 @@ contextBridge.executeInMainWorld({
       // Using the instance avoids re-loading the module on every offer AND ensures we
       // call handleIncomingSignalingOffer on the concrete stack object (not the module).
       if (rtStack) {
-        if (typeof rtStack.handleIncomingSignalingOffer === 'function') {
+        const stack = rtStack;
+        rtLastPeerJid = pl.peerJid;
+        if (typeof stack.handleIncomingSignalingOffer === 'function') {
+          let offerErr: string | null = null;
           try {
-            (rtStack.handleIncomingSignalingOffer as (...a: unknown[]) => void)(
+            (stack.handleIncomingSignalingOffer as (...a: unknown[]) => void)(
               pl.xmlNodeBase64, pl.msgPlatform, pl.msgVersion,
               pl.msgE, pl.msgT, pl.msgOffline, pl.isOfferNotContact, pl.peerJid,
             );
-            console.log('[roundtrip] OFFER-FED', JSON.stringify({ peerJid: pl.peerJid }));
+            rtOfferFed = true;
+            console.log('[roundtrip] OFFER-FED ' + JSON.stringify({ peerJid: pl.peerJid }));
           } catch (e) {
-            console.error('[roundtrip] OFFER-ERROR', String((e as Error)?.message ?? e));
+            offerErr = String((e as Error)?.message ?? e);
+            if (/enc|decrypt|key|cipher|signal/i.test(offerErr)) {
+              console.log('[roundtrip] OFFER-ENC-ISSUE ' + JSON.stringify({ error: offerErr }));
+            } else {
+              console.error('[roundtrip] OFFER-ERROR ' + offerErr);
+            }
+          }
+          // Try acceptCall 2 s after offer regardless of engine reaction — the engine
+          // moves to ReceivedCall(3) and waits; acceptCall is needed to elicit outbound.
+          if (!offerErr) {
+            setTimeout(() => {
+              const st = rtStack;
+              if (!st) return;
+              const jid = rtLastPeerJid ?? pl.peerJid;
+              console.log('[roundtrip] ACCEPT-CALLING ' + JSON.stringify({ peerJid: jid, engineReacted: rtEngineReacted }));
+              if (typeof st.acceptCall === 'function') {
+                try {
+                  (st.acceptCall as (...a: unknown[]) => void)(jid, false);
+                  console.log('[roundtrip] ACCEPT-CALLED ' + JSON.stringify({ threw: false, peerJid: jid }));
+                } catch (e) {
+                  const errStr = String((e as Error)?.message ?? e);
+                  console.log('[roundtrip] ACCEPT-CALLED ' + JSON.stringify({ threw: true, error: errStr }));
+                }
+              } else {
+                console.warn('[roundtrip] ACCEPT-CALLED skipped — acceptCall not a fn');
+              }
+            }, 2000);
           }
         } else {
           console.warn('[roundtrip] handleIncomingSignalingOffer not a fn on rtStack');
@@ -662,16 +696,19 @@ contextBridge.executeInMainWorld({
       const rl = getRequireLazy();
       if (!rl) { rt('INIT-FAIL', { why: 'requireLazy absent' }); return; }
 
-      // Verdict — defined early so all approaches below can call sendVerdict.
+      // Verdict — three-way, defined early so all approaches can call sendVerdict.
       let verdictSent = false;
       const sendVerdict = () => {
         if (verdictSent) return;
         verdictSent = true;
         const keyCbs = rtFiredCallbacks.filter(n => /key|cipher|ssrc|hkdf|hmac|derive/i.test(n));
-        const emittedSignaling = rtFiredCallbacks.some(n =>
-          /signaling|xmpp|voipCall|voipReady|WAWebVoipSend/i.test(n),
-        );
-        const verdict = { emittedSignaling, callbacks: [...rtFiredCallbacks], keyCallbacks: keyCbs };
+        const emittedSignalingAfterAccept = rtFiredCallbacks.some(n => /WAWebVoipSendSignalingXmpp/i.test(n));
+        const verdict = {
+          offerAcceptedByEngine: rtEngineReacted,
+          emittedSignalingAfterAccept,
+          keyCallbacks: keyCbs,
+          evidence: [...rtEvidence],
+        };
         rt('VERDICT', verdict);
         p.sendRoundtripVerdict(verdict);
       };
@@ -716,6 +753,47 @@ contextBridge.executeInMainWorld({
             return orig.apply(sm, args);
           };
         }
+      });
+
+      // ── Approach E: patch WADynamicRouterAsync (doc 43 §2.2) ────────────────
+      // The engine delivers state changes (CallState transitions, VoipEvent) via
+      // frontendSendAndReceive inside WADynamicRouterAsync — a separate channel from
+      // the outbound-stanza path. Patching here captures ReceivedCall(3) and any
+      // other in-process events the engine fires after processing the offer.
+      rl(['WADynamicRouterAsync'], (routerMod) => {
+        const router = routerMod as Record<string, unknown> | null;
+        if (!router) {
+          rt('APPROACH-E', { ok: false, why: 'WADynamicRouterAsync null' });
+          return;
+        }
+        const fns = Object.keys(router).filter(k => typeof router[k] === 'function');
+        rt('APPROACH-E', { ok: true, patchedFns: fns });
+        for (const fnName of fns) {
+          const orig = router[fnName] as (...a: unknown[]) => unknown;
+          router[fnName] = (...args: unknown[]) => {
+            const name = 'WADynamicRouterAsync.' + fnName;
+            const argsPreview = JSON.stringify(args).slice(0, 400);
+            rtFiredCallbacks.push(name);
+            rt('ENGINE-EVENT', { name, argsPreview });
+            p.sendRoundtripEvent(name, args);
+            // Any event after offer fed = engine accepted/reacted to the offer
+            if (rtOfferFed) {
+              rtEngineReacted = true;
+              rtEvidence.push(fnName + ':' + argsPreview.slice(0, 80));
+              rt('OFFER-ACCEPTED-BY-ENGINE', { evidence: rtEvidence });
+            }
+            return orig.apply(router, args);
+          };
+        }
+      });
+
+      // Also load WAWebVoipWaCallEnums so we can decode CallState numbers in events.
+      rl(['WAWebVoipWaCallEnums'], (enumMod) => {
+        const e = enumMod as Record<string, unknown> | null;
+        if (!e) { rt('CALL-ENUMS', { ok: false }); return; }
+        // Log CallState values so event args can be decoded from the log.
+        const cs = e.CallState as Record<string, unknown> | null;
+        rt('CALL-ENUMS', { ok: true, CallState: cs ? Object.entries(cs).slice(0, 20) : null });
       });
 
       // ── Approach B/C/D: factory arg + surface inspection ────────────────────
@@ -824,6 +902,7 @@ contextBridge.executeInMainWorld({
         rt('OUTBOUND-CHANNEL', {
           found: [
             'A:WAWebVoipSendSignalingXmpp-patch',
+            'E:WADynamicRouterAsync-event-tap',
             ...(factoryChannel === 'delegate-proxy' ? ['B:factory-delegate'] : []),
             ...(settable.length ? ['C:own-slots:' + settable.slice(0, 8).join(',')] : []),
             ...(setterUsed ? ['D:setter:' + setterUsed] : []),
