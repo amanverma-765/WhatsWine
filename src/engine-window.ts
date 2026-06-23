@@ -15,9 +15,6 @@ import { BrowserWindow, ipcMain, session } from 'electron';
 import path from 'node:path';
 
 const WA_ORIGIN = 'https://web.whatsapp.com/';
-const WA_HOST_ORIGIN = new URL(WA_ORIGIN).origin;
-// Ephemeral partition (no `persist:`) → always logged-out, nothing written to disk.
-const ENGINE_PARTITION = 'wa-engine';
 
 export interface EngineOfferPayload {
   xmlNodeBase64: string; msgPlatform: string; msgVersion: string; msgE: string;
@@ -96,16 +93,12 @@ export function createEngineWindow(): void {
   if (engineWindow) return;
   installEngineIpc();
 
-  const engineSession = session.fromPartition(ENGINE_PARTITION);
-  const userAgent = engineSession.getUserAgent()
-    .replace(/ Electron\/[^ ]+/, '').replace(/ WhatsWine\/[^ ]+/, '');
-  engineSession.setUserAgent(userAgent);
-
-  engineSession.setPermissionRequestHandler((_wc, permission, cb) =>
-    cb(permission === 'notifications' || permission === 'media' || permission === 'clipboard-sanitized-write'));
-  engineSession.setDevicePermissionHandler(() => true);
-  engineSession.setPermissionCheckHandler((_wc, permission, origin) =>
-    ['media', 'microphone', 'camera', 'speaker-selection'].includes(permission) || origin === WA_HOST_ORIGIN);
+  // SHARE the hybrid's logged-in session. The WA backend runs in a SharedWorker shared across windows of
+  // the same session+origin, so the engine attaches to the hybrid's already-connected backend (setApi
+  // done, socket open) — a real logged-in backend for the voip WASM WITHOUT a second login. defaultSession
+  // is already configured (UA, media permission, persistent-storage) by the hybrid window's createWindow().
+  const engineSession = session.defaultSession;
+  const userAgent = engineSession.getUserAgent();
 
   engineWindow = new BrowserWindow({
     width: 900, height: 700,
@@ -115,7 +108,7 @@ export function createEngineWindow(): void {
     webPreferences: {
       preload: path.join(__dirname, 'engine-preload.js'),
       contextIsolation: true, nodeIntegration: false, sandbox: true,
-      partition: ENGINE_PARTITION,
+      // No partition → defaultSession (shared login + backend SharedWorker with the hybrid).
       backgroundThrottling: false,
     },
   });
