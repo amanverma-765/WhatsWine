@@ -4,6 +4,8 @@ import { writeFileSync } from 'node:fs';
 import started from 'electron-squirrel-startup';
 import { appIcon } from './icon';
 import { installSoundPlayer } from './sound';
+import { installRingtone } from './ringtone';
+import { showMainWindow } from './window';
 import { installBridges } from './bridge/registry';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
@@ -61,12 +63,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 app.on('second-instance', () => showWindow());
 
-function showWindow() {
-  if (!mainWindow) return;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
-}
+const showWindow = showMainWindow;
 
 // Unread badge + tray tooltip from the tab title ("(N) WhatsApp"). No bridge needed.
 function updateUnread(title: string) {
@@ -209,7 +206,7 @@ const createWindow = () => {
   // Inject the WhatsApp notification-tone player into the WA page on every load
   // (idempotent self-guard). The native SystemIntegrations.playTone bridge triggers
   // it from the main process (src/sound.ts).
-  wc.on('dom-ready', () => installSoundPlayer(wc));
+  wc.on('dom-ready', () => { installSoundPlayer(wc); installRingtone(wc); });
 
   // Close button hides to tray instead of quitting (real quit via tray / before-quit).
   mainWindow.on('close', (e) => {

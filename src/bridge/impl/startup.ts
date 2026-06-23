@@ -8,6 +8,7 @@ import type { BridgeFactory, BridgeContext } from '../types';
 import { toWeb } from '../eventtarget';
 import { appIcon } from '../../icon';
 import { playTone as playToneSound, playWaTone } from '../../sound';
+import { showMainWindow } from '../../window';
 
 const LAUNCH_TS = Date.now();
 
@@ -80,7 +81,10 @@ function systemIntegrationsBridge(): ReturnType<BridgeFactory> {
       // play the real WhatsApp tone ourselves (sound.ts) — matches the native client.
       const n = new Notification({ title: header || 'WhatsApp', body: body || 'New message', icon: thumbnailPath || appIcon(), silent: true });
       // ponytail: reply/context actions need libnotify action wiring — basic toast now.
-      n.on('click', () => tw.call('messageNotificationAction', { tag: tag || key, action: 'open', additionalData: '' }));
+      n.on('click', () => {
+        tw.call('messageNotificationAction', { tag: tag || key, action: 'open', additionalData: '' });
+        showMainWindow();   // bundle switches chat; bring the (maybe tray-hidden) window forward
+      });
       n.show();
       playWaTone();
       open.set(`${key}|${tag}`, n);

@@ -25,6 +25,28 @@ import { Notification } from 'electron';
 import type { BridgeFactory, BridgeContext } from '../types';
 import { toWeb } from '../eventtarget';
 import { appIcon } from '../../icon';
+import { startRingtone, stopRingtone } from '../../ringtone';
+import { showMainWindow } from '../../window';
+
+// ─── Ringtone control ────────────────────────────────────────────────────────
+// The bundle's WebRTC stack stays silent here (engine stubbed), so we loop the
+// Windows ringtone ourselves while a call is offering. There's no reliable
+// "call ended" callback on the offer path, so the loop auto-stops on a timer
+// that re-arms on each re-fired offer; offers stop when the caller gives up or
+// the call is answered elsewhere, so the ring stops ~RING_REARM_MS later.
+// Local decline/hangup (endCall / reject / signOut) stops it immediately.
+// ponytail: timer-gated loop; caller-cancel tail is bounded by RING_REARM_MS.
+const RING_REARM_MS = 12_000;
+let ringStop: ReturnType<typeof setTimeout> | null = null;
+function ring(): void {
+  if (ringStop) clearTimeout(ringStop);
+  else startRingtone();
+  ringStop = setTimeout(stopRing, RING_REARM_MS);
+}
+function stopRing(): void {
+  if (ringStop) { clearTimeout(ringStop); ringStop = null; }
+  stopRingtone();
+}
 
 // ─── Incoming-call notification ──────────────────────────────────────────────
 // Desktop can't take the call (no IVoip engine), so the one useful thing we can
@@ -60,12 +82,14 @@ function showIncomingCallToast(ctx: BridgeContext, peerJid: string): void {
   if (now - (lastCallToast.get(peerJid) ?? 0) < CALL_TOAST_WINDOW_MS) return;
   lastCallToast.set(peerJid, now);
   const who = callerLabel(ctx, peerJid);
-  new Notification({
+  const n = new Notification({
     title: 'Incoming WhatsApp call',
-    body: `${who} is calling. Answer this call on your phone — calls aren't supported on WhatsApp Desktop yet.`,
+    body: `${who} is calling. Answer on your phone.`,
     icon: appIcon(),
-    silent: true,   // the bundle's in-app call UI already rings via its WebRTC stack
-  }).show();
+    silent: true,   // we loop the ringtone ourselves (see ring() above)
+  });
+  n.on('click', () => showMainWindow());   // surface the bundle's in-app call screen
+  n.show();
 }
 
 // ponytail self-check (WA_VOIP_SELFCHECK=1): jid parse + dedup, no framework.
@@ -139,6 +163,7 @@ function voipBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactory> {
     // Called on logout to tear down any active call (VoipWebCore.cs, §3.9).
     // No active call possible without the engine; log only.
     handleSignOut: () => {
+      stopRing();
       ctx.log('[VoipBridge] handleSignOut — no active call (engine absent)');
     },
 
@@ -169,12 +194,14 @@ function voipBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactory> {
     // EndCall — tear down active call (doc 41 §3.2).
     // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     endCall: (callId: unknown, ...rest: unknown[]) => {
+      stopRing();
       ctx.log('[VoipBridge] endCall (stub)', callId, ...rest);
     },
 
     // RejectCallWithoutCallContext — reject before engine has call context.
     // ponytail: no Linux IVoip equivalent — bundle WebRTC handles media; native engine deferred.
     rejectCallWithoutCallContext: (...args: unknown[]) => {
+      stopRing();
       ctx.log('[VoipBridge] rejectCallWithoutCallContext (stub)', ...args);
     },
 
@@ -270,6 +297,7 @@ function voipSignalingBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactor
     ) => {
       ctx.log('[VoipSignalingBridge] handleIncomingSignalingOffer (stub)', { peerJid, msgPlatform, msgT });
       showIncomingCallToast(ctx, String(peerJid ?? ''));
+      ring();
     },
 
     // HandleIncomingSignalingMessage — mid-call signaling (rekey, update, etc.).
