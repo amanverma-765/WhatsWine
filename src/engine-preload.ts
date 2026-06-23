@@ -357,15 +357,32 @@ contextBridge.executeInMainWorld({
         // boundaries (it's a `let`, so any async callback could reassign it).
         const stack = stackRef;
 
-        // ── API surface enumeration ─────────────────────────────────────────
-        const allKeys = Object.keys(stack);
+        // ── API surface enumeration — walk prototype chain ──────────────────
+        // Class instances (like WAWebVoipStackInterfaceWeb) keep their methods
+        // on the prototype, not as own properties. Object.keys() returns [] for
+        // such instances. Walk getPrototypeOf() to collect everything.
+        const allMethods: { name: string; arity: number | string }[] = [];
+        const seen = new Set<string>();
+        let proto: object | null = stack;
+        while (proto && proto !== Object.prototype) {
+          for (const name of Object.getOwnPropertyNames(proto)) {
+            if (seen.has(name) || name === 'constructor') continue;
+            seen.add(name);
+            try {
+              const desc = Object.getOwnPropertyDescriptor(proto, name);
+              if (desc && typeof desc.value === 'function') {
+                allMethods.push({ name, arity: (desc.value as { length?: number }).length ?? '?' });
+              }
+            } catch { /* live accessor that throws — skip */ }
+          }
+          proto = Object.getPrototypeOf(proto) as object | null;
+        }
+        const ownKeys = Object.keys(stack);
         pb('API-SURFACE', {
-          totalKeys: allKeys.length,
-          methods: allKeys
-            .filter(k => typeof stack[k] === 'function')
-            .map(k => ({ name: k, arity: (stack[k] as { length?: number }).length ?? '?' }))
-            .slice(0, 50),
-          nonFns: allKeys.filter(k => typeof stack[k] !== 'function').slice(0, 20),
+          ownKeys: ownKeys.length,
+          protoMethods: allMethods.length,
+          methods: allMethods.slice(0, 60),
+          ownNonFns: ownKeys.filter(k => typeof stack[k] !== 'function').slice(0, 20),
         });
 
         // ── Wire callback observers for U2 ───────────────────────────────────
@@ -483,14 +500,42 @@ contextBridge.executeInMainWorld({
           if (u1aSettled) return;
           u1aSettled = true;
           const m = mod as Record<string, unknown> | null;
-          const ok = !!m;
+          if (!m || typeof m.createWAWebVoipStackInterface !== 'function') {
+            u1aR = {
+              method: 'requireLazy(WAWebVoipStackInterfaceWeb)',
+              fired: true, ok: false,
+              why: !m ? 'null mod' : 'no createWAWebVoipStackInterface fn',
+              moduleKeys: m ? Object.keys(m).slice(0, 20) : null,
+            };
+            decr(); return;
+          }
+          // IMPORTANT: the module exports only the factory. Call it to get the
+          // concrete stack instance (the object with handleIncomingSignalingOffer etc.).
+          // Try arg-less first (doc 43 §2.1 shows it called with no args); if it
+          // throws (e.g. isVoipDownloadEnabled guard), retry with {} and log the error.
+          let inst: Record<string, unknown> | null = null;
+          let factoryErr: string | null = null;
+          try {
+            inst = (m.createWAWebVoipStackInterface as () => unknown)() as Record<string, unknown> | null;
+          } catch (e1) {
+            factoryErr = String((e1 as Error)?.message ?? e1);
+            try {
+              inst = (m.createWAWebVoipStackInterface as (c: unknown) => unknown)({}) as Record<string, unknown> | null;
+              factoryErr = null; // retry with {} succeeded
+            } catch (e2) {
+              factoryErr += ' | with-{}: ' + String((e2 as Error)?.message ?? e2);
+            }
+          }
           u1aR = {
             method: 'requireLazy(WAWebVoipStackInterfaceWeb)',
-            fired: true, ok,
-            type: m ? m.type : null,
-            keys: m ? Object.keys(m).slice(0, 20) : null,
+            fired: true, ok: !!inst,
+            moduleKeys: Object.keys(m).slice(0, 10),
+            factory: inst ? 'ok' : 'failed',
+            factoryErr,
           };
-          if (ok && m && !stackRef) { stackRef = m; stackVia = 'U1a'; }
+          // Prefer factory instance over any previously-set U1b/U1c result —
+          // this is the concrete WAWebVoipStackInterfaceWeb implementation.
+          if (inst) { stackRef = inst; stackVia = 'U1a'; }
           decr();
         });
       } catch (e) {
