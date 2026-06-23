@@ -244,6 +244,27 @@ contextBridge.executeInMainWorld({
     };
     hookHybridDispatch();
 
+    // Discovery: does the Accept/Decline click even reach the DOM, and does it lazy-load a voip action?
+    try {
+      document.addEventListener('click', (e) => {
+        const t = e.target as { tagName?: string; textContent?: string; getAttribute?: (a: string) => string | null } | null;
+        const txt = (t?.textContent || '').replace(/\s+/g, ' ').slice(0, 40);
+        const al = t?.getAttribute?.('aria-label') || '';
+        console.log('[wabridge] CLICK <' + (t?.tagName || '?') + '> aria="' + al + '" text="' + txt + '"');
+      }, true);
+      const rlw = (window as unknown as { requireLazy?: (m: string[], cb: (...x: unknown[]) => void) => void });
+      const origRl = rlw.requireLazy;
+      if (typeof origRl === 'function' && !(origRl as { __waW?: boolean }).__waW) {
+        const wrapped = (mods: string[], cb: (...x: unknown[]) => void) => {
+          try { if (Array.isArray(mods) && mods.some((m) => /[Vv]oip|[Cc]all|ccept|nswer|eject|ecline/.test(m))) console.log('[wabridge] requireLazy ' + JSON.stringify(mods)); } catch { /* ignore */ }
+          return origRl(mods, cb);
+        };
+        (wrapped as { __waW?: boolean }).__waW = true;
+        rlw.requireLazy = wrapped;
+      }
+      console.log('[wabridge] click + requireLazy taps installed');
+    } catch (e) { console.log('[wabridge] click/requireLazy tap failed: ' + String(e)); }
+
     // Legacy comma-IPC shim (bridgeError=1, doc 31 §5.2) — no-throw; modern bundle
     // uses hostObjects. ponytail: native->JS legacy events unused.
     const legacy = new Set<(e: { data: unknown }) => void>();
