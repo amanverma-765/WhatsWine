@@ -228,24 +228,29 @@ WA_ROUNDTRIP=1 WA_ROUNDTRIP_STARTCALL=19195550001@s.whatsapp.net WA_ENGINE_SHOW=
 ```json
 {
   "offerAcceptedByEngine": true/false,
-  "emittedSignalingAfterAccept": true/false,
+  "emittedOutboundSignaling": true/false,
+  "callId": "...",
   "keyCallbacks": [...],
-  "evidence": [...]
+  "evidence": [...],
+  "noOfferReceived": false
 }
 ```
 
-| offerAcceptedByEngine | emittedSignalingAfterAccept | Interpretation |
-|----------------------|----------------------------|----------------|
+| offerAcceptedByEngine | emittedOutboundSignaling | Interpretation |
+|----------------------|--------------------------|----------------|
 | `true` | `true` | **GREEN** — full round-trip: engine accepted offer, called acceptCall, emitted outbound stanza. Option B is end-to-end drivable. |
 | `true` | `false` | **YELLOW-PROMISING** — engine reacted to offer (ReceivedCall state); acceptCall didn't elicit stanza yet. Likely needs real session keys or JIDs for Signal encryption of the accept. |
 | `false` | any | **YELLOW-SILENT** — no engine event after offer. Check `APPROACH-E` (did WADynamicRouterAsync load?), `OFFER-ENC-ISSUE` (enc not inlined?), `VOIP-INIT` (did init succeed?). |
 | any | any | `keyCallbacks` non-empty — engine is demanding crypto material; session keys needed. |
+| any | any | `noOfferReceived:true` — verdict fired on 90 s fallback; no offer arrived. Hybrid bridge didn't forward one. |
 
-`evidence` contains the actual `WADynamicRouterAsync` function names and arg previews that fired
-after the offer — paste these in your analysis to identify the exact state transitions.
+`callId` — extracted from outbound stanza args (present when `emittedOutboundSignaling:true`).
 
-The 30 s fallback verdict fires automatically. Any `WAWebVoipSendSignalingXmpp` interception
-fires an early verdict (2 s grace).
+`evidence` — `WAWebVoipSendSignalingXmpp.*` and `WADynamicRouterAsync.*` captures after offer.
+Inbound engine methods (`handleIncomingSignalingOffer`, `acceptCall`, etc.) are excluded.
+
+**Timing:** verdict is offer-anchored. It fires 8 s after `OFFER-FED` (re-armed on each
+outbound emission). If no offer arrives, a 90 s fallback fires with `noOfferReceived:true`.
 
 ### Sequence of expected log lines (happy path)
 
@@ -265,7 +270,7 @@ fires an early verdict (2 s grace).
 [roundtrip] ACCEPT-CALLING {"peerJid":"...","engineReacted":true}
 [roundtrip] ACCEPT-CALLED {"threw":false,"peerJid":"..."}
 [roundtrip] ENGINE-OUTBOUND {"method":"WAWebVoipSendSignalingXmpp.sendSignalingXmpp","argsPreview":"..."}
-[roundtrip] VERDICT {"offerAcceptedByEngine":true,"emittedSignalingAfterAccept":true,...}
+[roundtrip] VERDICT {"offerAcceptedByEngine":true,"emittedOutboundSignaling":true,"callId":"...","evidence":[...]}
 ```
 
 ### If `INIT-FAIL why:module absent`
