@@ -214,23 +214,37 @@ contextBridge.executeInMainWorld({
 
     // Retry the voip-module load: the first requireLazy can hang if the download gate hasn't flipped
     // yet, and it never retries itself — re-issue until it resolves (~50s budget).
-    // The dispatcher (WAWebVoipStackInterface) is what resolves in the current bundle; the concrete
-    // *Web name no longer does. Race both — instantiate from whichever fires first.
-    const VOIP_MODULES = ['WAWebVoipStackInterface', 'WAWebVoipStackInterfaceWeb'];
+    // Two-step load. The concrete WAWebVoipStackInterfaceWeb (whose createWAWebVoipStackInterface(delegate)
+    // accepts OUR delegate, so ToWeb callbacks like handleVoipCall reach us) doesn't resolve until the
+    // dispatcher (WAWebVoipStackInterface) has pulled its chunk. So: load the dispatcher to trigger the
+    // download, THEN instantiate via the concrete factory with our delegate. The dispatcher's
+    // getVoipStackInterface() returns a singleton wired to the bundle's own (dead, QR-screen) UI, so it's
+    // only the fallback if the concrete factory never appears.
     let voipLoaded = false;
     let voipTries = 0;
+    const useConcreteOrFallback = (rl: RL, disp: unknown) => {
+      rl(['WAWebVoipStackInterfaceWeb'], (web) => {
+        if (voipLoaded) return;
+        const wm = web as Record<string, unknown> | null;
+        if (wm && typeof wm.createWAWebVoipStackInterface === 'function') {
+          voipLoaded = true; p.log('instantiating via concrete createWAWebVoipStackInterface(delegate)');
+          instantiate(web); return;
+        }
+        if (voipLoaded) return;
+        voipLoaded = true; p.log('concrete factory missing; dispatcher fallback'); instantiate(disp);
+      });
+      // If the concrete name still won't resolve, fall back to the dispatcher singleton.
+      setTimeout(() => { if (!voipLoaded) { voipLoaded = true; p.log('concrete load timeout; dispatcher fallback'); instantiate(disp); } }, 4000);
+    };
     const loadVoip = (rl: RL) => {
       if (voipLoaded) return;
       if (++voipTries > 10) { p.log('voip module never loaded after 10 tries (~50s)'); readGating(rl); return; }
-      for (const name of VOIP_MODULES) {
-        rl([name], (mod) => {
-          if (voipLoaded) return;
-          voipLoaded = true;
-          p.log(name + ' loaded (try ' + voipTries + ')');
-          instantiate(mod);
-        });
-      }
-      setTimeout(() => { if (!voipLoaded) loadVoip(rl); }, 5000);
+      rl(['WAWebVoipStackInterface'], (disp) => {
+        if (voipLoaded) return;
+        p.log('dispatcher loaded (try ' + voipTries + '); resolving concrete impl');
+        useConcreteOrFallback(rl, disp);
+      });
+      setTimeout(() => { if (!voipLoaded) loadVoip(rl); }, 6000);
     };
 
     // One-shot diagnostic: which voip module-resolution paths actually resolve in THIS session?
