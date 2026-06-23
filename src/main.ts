@@ -448,9 +448,10 @@ app.on('ready', () => {
   // Hybrid-calls: create the hidden engine window AFTER installBridges() — voip.ts registers the
   // outbound relay during installBridges(), which the engine window needs before it emits.
   if (HYBRID_CALLS) {
-    // Replay the engine's native call events into the hybrid bundle so the call UI rings.
+    // The engine emits {eventType, eventDataJson}; deliver it as a VoipBridge "handleVoipCallEvent"
+    // (the IVoipBridgeToWeb EventTarget surface the bundle subscribes to) so the call UI rings.
     setNativeEventRelay((eventType, eventDataJson) =>
-      mainWindow?.webContents.send('wa-hybrid:native-call-event', eventType, eventDataJson));
+      mainWindow?.webContents.send('wa-bridge:event', 'VoipBridge', 'handleVoipCallEvent', { eventType, userData: 0, eventDataJson }));
     createEngineWindow();
   }
 });

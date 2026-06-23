@@ -159,49 +159,36 @@ contextBridge.executeInMainWorld({
     // Anything (offers, JID answers) can arrive before the stack is ready. Queue and flush on ready.
     const pendingControl: [string, unknown[]][] = [];
 
-    // ── onCallEvent interception (engine → hybrid) ───────────────────────────────
-    // The WASM emits every call event through window.WhatsAppVoipWasm*Callbacks.onCallEvent
-    // ({eventType, eventDataJson}). Wrap it on BOTH tables (the real dispatcher lives on the
-    // worker-compatible one): relay the raw primitives to the hybrid, then run the original so the
-    // engine's own media handlers (P2P transport, etc.) still execute here.
-    let callEventsHooked = false;
-    const hookCallEvents = () => {
-      if (callEventsHooked) return;
-      const w = window as unknown as Record<string, { onCallEvent?: (t: { eventType: unknown; eventDataJson: unknown }) => unknown; __waHooked?: boolean }>;
-      let hooked = 0;
-      for (const tbl of ['WhatsAppVoipWasmWorkerCompatibleCallbacks', 'WhatsAppVoipWasmCallbacks']) {
-        const cbs = w[tbl];
-        if (cbs && typeof cbs.onCallEvent === 'function' && !cbs.__waHooked) {
-          cbs.__waHooked = true;
-          const orig = cbs.onCallEvent.bind(cbs);
-          cbs.onCallEvent = (t) => {
-            p.log('onCallEvent fired: type=' + String(t?.eventType));
-            try { p.nativeEvent(t?.eventType, t?.eventDataJson); } catch (e) { p.log('nativeEvent relay err ' + String(e)); }
-            return orig(t);
-          };
-          hooked++;
-        }
-      }
-      if (hooked) { callEventsHooked = true; p.log('onCallEvent hooked on ' + hooked + ' table(s)'); }
+    // ── Synthesize the incoming-call ring (engine → hybrid) ──────────────────────
+    // The WASM's onCallEvent runs in the WA backend worker and can't be hooked from this main world.
+    // We don't need it: we already decode the offer node, so we BUILD the windows-format
+    // CallStateChanged(16)/CallState=ReceivedCall(3) eventDataJson ourselves and relay it. The hybrid
+    // delivers it as a VoipBridge "handleVoipCallEvent" → onCallEvent → rings (doc 98 §ring schema).
+    const attrStr = (v: unknown): string => {
+      if (v == null) return '';
+      if (typeof v === 'string') return v;
+      // call-id and jids may arrive as byte buffers — render printable bytes as a string.
+      const u = (v instanceof Uint8Array) ? v : (Array.isArray(v) ? Uint8Array.from(v as number[]) : null);
+      if (u) { let s = ''; for (const b of u) s += String.fromCharCode(b & 0xff); return s; }
+      if (typeof v === 'object' && 'toString' in (v as object)) return String(v);
+      return String(v);
     };
-
-    // The reliable funnel: WAWebVoipHandleNativeCallEvent.handleWAWebVoipNativeCallEvent(eventType,
-    // eventDataJson) — both onCallEvent paths converge here and it runs in the frontend (its handlers
-    // call frontendFireAndForget). Wrap the module export to relay every event to the hybrid.
-    let nceHooked = false;
-    const hookNativeCallEvent = (rl: RL) => {
-      rl(['WAWebVoipHandleNativeCallEvent'], (mod) => {
-        const H = mod as Record<string, unknown> | null;
-        if (!H || typeof H.handleWAWebVoipNativeCallEvent !== 'function' || nceHooked) return;
-        nceHooked = true;
-        const orig = H.handleWAWebVoipNativeCallEvent as (...a: unknown[]) => unknown;
-        H.handleWAWebVoipNativeCallEvent = (eventType: unknown, eventDataJson: unknown, ...rest: unknown[]) => {
-          p.log('handleNativeCallEvent fired: type=' + String(eventType) + ' (' + typeof eventType + ')');
-          try { p.nativeEvent(eventType, eventDataJson); } catch (e) { p.log('nce relay err ' + String(e)); }
-          return orig(eventType, eventDataJson, ...rest);
-        };
-        p.log('handleWAWebVoipNativeCallEvent hooked');
-      });
+    const synthesizeRing = (node: unknown, peerJid: string) => {
+      const n = node as { tag?: string; attrs?: Record<string, unknown>; content?: unknown } | null;
+      const attrs = n?.attrs ?? {};
+      const children = Array.isArray(n?.content) ? (n?.content as { tag?: string }[]) : null;
+      p.log('offer node tag=' + String(n?.tag) + ' attrKeys=' + JSON.stringify(Object.keys(attrs))
+        + ' children=' + JSON.stringify(children ? children.map(c => c?.tag) : typeof n?.content));
+      const callId = attrStr(attrs['call-id'] ?? attrs['callId'] ?? attrs['id']);
+      const creator = attrStr(attrs['call-creator'] ?? attrs['from']) || peerJid;
+      const hasVideo = !!children && children.some(c => c?.tag === 'video');
+      const ring = {
+        CallState: 3, CallId: callId,
+        CreatorJid: { str: creator }, PeerJid: peerJid, InitialPeerJid: peerJid,
+        VideoEnabled: hasVideo, IsGroupCall: false, IsJoinableCall: false, IsLightweight: false,
+      };
+      p.log('synthesized ring: ' + JSON.stringify(ring));
+      p.nativeEvent(16, JSON.stringify(ring));
     };
 
     const methodNames = (obj: unknown): string[] => {
@@ -218,8 +205,6 @@ contextBridge.executeInMainWorld({
       if (!stack) return;
       p.log('stack methods: ' + JSON.stringify(methodNames(stack).slice(0, 60)));
       p.ready({ type: stack.type ?? 'unknown', hasOffer: typeof stack.handleIncomingSignalingOffer === 'function' });
-      // Hook the WASM event tables now that createWAWebVoipStackInterface() has populated the globals.
-      hookCallEvents();
       // The engine owns its own init: voipInit() with NO args (proven). The hybrid's forwarded voipInit
       // is ignored (its native-callback args don't survive IPC).
       try { (stack.voipInit as (() => unknown) | undefined)?.(); p.log('voipInit() called (no args)'); }
@@ -290,7 +275,6 @@ contextBridge.executeInMainWorld({
       patchOutboundSignaling(rl);
       forceCalling(rl);
       loadWapModules(rl);
-      hookNativeCallEvent(rl);
       setTimeout(() => { readGating(rl); loadVoip(rl); }, 1200);
     };
 
@@ -305,12 +289,14 @@ contextBridge.executeInMainWorld({
     };
 
     // Inbound signaling: decode base64 → node wrapper, THEN call the stack (async decode).
-    const callWithWrappedNode = async (method: string, b64Str: string, rest: unknown[]) => {
+    // ringPeerJid (offer only) → also synthesize the incoming-call ring for the hybrid.
+    const callWithWrappedNode = async (method: string, b64Str: string, rest: unknown[], ringPeerJid?: string) => {
       try {
         const wrapped = await wrapNode(b64Str);
         let tag: unknown = '?';
         try { const nn = wrapped.node() as { tag?: unknown }; tag = nn?.tag ?? Object.keys(nn ?? {}); } catch { /* ignore */ }
         p.log(method + ': decoded ok (tag=' + JSON.stringify(tag) + '), applying to stack=' + (!!stack));
+        if (ringPeerJid) { try { synthesizeRing(wrapped.node(), ringPeerJid); } catch (e) { p.log('ring synth failed: ' + String(e)); } }
         call(method, [wrapped, ...rest]);
       }
       catch (e) { p.log(method + ' wrap/decode failed: ' + String(e)); }
@@ -319,7 +305,7 @@ contextBridge.executeInMainWorld({
     p.onOffer((pl) => {
       const o = pl as { xmlNodeBase64: string; msgPlatform: string; msgVersion: string; msgE: string; msgT: string; msgOffline: boolean; isOfferNotContact: boolean; peerJid: string; tcToken?: unknown };
       callWithWrappedNode('handleIncomingSignalingOffer', o.xmlNodeBase64,
-        [o.msgPlatform, o.msgVersion, o.msgE, o.msgT, o.msgOffline, o.isOfferNotContact, o.peerJid, o.tcToken]);
+        [o.msgPlatform, o.msgVersion, o.msgE, o.msgT, o.msgOffline, o.isOfferNotContact, o.peerJid, o.tcToken], o.peerJid);
     });
     p.onSignaling((pl) => { const o = pl as { xmlNodeBase64: string; extraArgs: unknown[] }; callWithWrappedNode('handleIncomingSignalingMessage', o.xmlNodeBase64, o.extraArgs); });
     p.onAck((pl) => { const o = pl as { xmlNodeBase64: string; ackInfoError: unknown; ackInfoType: unknown; peerJid: string }; callWithWrappedNode('handleIncomingSignalingAck', o.xmlNodeBase64, [o.ackInfoError, o.ackInfoType, o.peerJid]); });
