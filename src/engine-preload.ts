@@ -103,49 +103,63 @@ contextBridge.executeInMainWorld({
     // leave the engine uninitialized and offers would fail.
     const pendingControl: [string, unknown[]][] = [];
 
+    type RL = (mods: string[], cb: (m: unknown) => void) => void;
+
+    const instantiate = (mod: unknown) => {
+      const m = mod as Record<string, unknown> | null;
+      if (!m || typeof m.createWAWebVoipStackInterface !== 'function') { p.log('voip module loaded but factory missing'); return; }
+      try { stack = (m.createWAWebVoipStackInterface as (d: unknown) => unknown)(delegate) as Stack; }
+      catch { try { stack = (m.createWAWebVoipStackInterface as () => unknown)() as Stack; } catch (e) { p.log('factory failed: ' + String(e)); return; } }
+      p.ready({ type: stack.type ?? 'unknown', hasOffer: typeof stack.handleIncomingSignalingOffer === 'function' });
+      // Flush everything queued before the stack was ready, in arrival order.
+      for (const [mm, a] of pendingControl.splice(0)) call(mm, a);
+    };
+
+    // Force web-calling AB props ON so the voip download gate (isVoipDownloadEnabled) is true —
+    // a logged-out session has no server flag. Widened to the download/init keys too (doc 43 §2.6).
+    const forceCalling = (rl: RL) => {
+      rl(['WAWebABProps'], (abMod) => {
+        const AB = abMod as Record<string, unknown> | null;
+        if (!AB || typeof AB.setGetABPropConfigValueImpl !== 'function') { p.log('WAWebABProps seam missing'); return; }
+        const FORCE: Record<string, boolean> = {
+          enable_web_calling: true, enable_web_group_calling: true,
+          web_calling_download_voip: true, web_calling_init_voip: true,
+        };
+        const origAb = typeof AB.getABPropConfigValue === 'function' ? (AB.getABPropConfigValue as (k: string) => unknown).bind(AB) : null;
+        let inHook = false;
+        (AB.setGetABPropConfigValueImpl as (fn: (k: string) => unknown) => void)((key) => {
+          if (key in FORCE) return FORCE[key];
+          if (inHook || !origAb) return undefined;
+          inHook = true; try { return origAb(key); } finally { inHook = false; }
+        });
+        p.log('forced web-calling AB props ON');
+      });
+    };
+
+    // Retry the voip-module load: the first requireLazy can hang if the download gate hasn't flipped
+    // yet, and it never retries itself — re-issue until it resolves (~50s budget).
+    let voipLoaded = false;
+    let voipTries = 0;
+    const loadVoip = (rl: RL) => {
+      if (voipLoaded) return;
+      if (++voipTries > 10) { p.log('voip module never loaded after 10 tries (~50s)'); return; }
+      rl(['WAWebVoipStackInterfaceWeb'], (mod) => {
+        if (voipLoaded) return;
+        voipLoaded = true;
+        p.log('WAWebVoipStackInterfaceWeb loaded (try ' + voipTries + ')');
+        instantiate(mod);
+      });
+      setTimeout(() => { if (!voipLoaded) loadVoip(rl); }, 5000);
+    };
+
     const init = () => {
       const rl = getRequireLazy();
       if (!rl) { if (++initTries % 5 === 0) p.log('waiting for requireLazy... ' + initTries + 's'); setTimeout(init, 1000); return; }
       const w = window as unknown as { crossOriginIsolated?: boolean };
       p.log('requireLazy ready; coI=' + String(w.crossOriginIsolated) + ' SAB=' + (typeof SharedArrayBuffer));
       patchOutboundSignaling(rl);
-      let voipLoaded = false;
-      setTimeout(() => { if (!voipLoaded) p.log('WAWebVoipStackInterfaceWeb load TIMEOUT (20s) — calling not forced / chunk gated off'); }, 20000);
-      // The voip module's lazy chunk only fetches when web-calling is enabled. Logged-out has no
-      // server flag, so force the AB props ON, THEN load the stack INSIDE the callback — racing it
-      // (loading the module before the hook is installed) leaves requireLazy hanging forever.
-      rl(['WAWebABProps'], (abMod) => {
-        const AB = abMod as Record<string, unknown> | null;
-        if (AB && typeof AB.setGetABPropConfigValueImpl === 'function') {
-          const FORCE: Record<string, boolean> = { enable_web_calling: true, enable_web_group_calling: true };
-          const origAb = typeof AB.getABPropConfigValue === 'function' ? (AB.getABPropConfigValue as (k: string) => unknown).bind(AB) : null;
-          let inHook = false;
-          (AB.setGetABPropConfigValueImpl as (fn: (k: string) => unknown) => void)((key) => {
-            if (key in FORCE) return FORCE[key];
-            if (inHook || !origAb) return undefined;
-            inHook = true; try { return origAb(key); } finally { inHook = false; }
-          });
-          p.log('forced web-calling AB props ON');
-        } else { p.log('WAWebABProps.setGetABPropConfigValueImpl missing'); }
-        rl(['WAWebVoipStackInterfaceWeb'], (mod) => {
-        voipLoaded = true;
-        p.log('WAWebVoipStackInterfaceWeb loaded');
-        const m = mod as Record<string, unknown> | null;
-        if (!m || typeof m.createWAWebVoipStackInterface !== 'function') {
-          p.log('WAWebVoipStackInterfaceWeb / factory missing'); return;
-        }
-        try {
-          stack = (m.createWAWebVoipStackInterface as (d: unknown) => unknown)(delegate) as Stack;
-        } catch {
-          try { stack = (m.createWAWebVoipStackInterface as () => unknown)() as Stack; }
-          catch (e) { p.log('factory failed: ' + String(e)); return; }
-        }
-        p.ready({ type: stack.type ?? 'unknown', hasOffer: typeof stack.handleIncomingSignalingOffer === 'function' });
-        // Flush everything queued before the stack was ready, in arrival order
-        // (voipInit precedes any offer that came after it).
-        for (const [m, a] of pendingControl.splice(0)) call(m, a);
-        });   // end rl(WAWebVoipStackInterfaceWeb)
-      });     // end rl(WAWebABProps)
+      forceCalling(rl);
+      setTimeout(() => loadVoip(rl), 1200);   // let the force settle before the first load attempt
     };
 
     const call = (method: string, args: unknown[]) => {
