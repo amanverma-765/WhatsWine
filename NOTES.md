@@ -56,10 +56,12 @@ number still work (jid-based); groups / numberless peers fall back to surfacing 
   the `same-origin` isolation headers). Our `setWindowOpenHandler` allows same-origin WA popouts and
   **sizes them to cover the main window** (`win.getBounds()`), keeping the system frame (movable /
   maximizable). It is the visible call surface.
-- **Auto-close on call end (event-driven):** the popout subscribes to
-  `WAWebCallCollection.on('change:activeCall')` and closes when the active call goes away
-  (hang up / reject). A one-shot ~25s timer closes a popout that never connects (blank). _Decision A:
-  closes right after WhatsApp's own brief "Call ended" screen — not before._
+- **Auto-close on call end (opener-driven):** call state is **opener-owned** — `WAWebCallCollection`
+  is per-window and the popout gets a fresh instance whose `activeCall` is *never* set. So the main
+  process polls the **call view's** (`wc`'s) `activeCall` and closes the popout when it goes away
+  (hang up / reject), transition-gated on having seen an active call first; a ~25s fallback closes a
+  popout that never connects (blank). _A previous popout-side `change:activeCall` + 25s check read
+  the popout's permanently-empty collection and force-closed every call at ~25s — the auto-reject bug._
 - **Closing / moving the call out → end it:** an opener-side guard in the call layer watches
   `WAWebVoipPopoutWindowState.getIsCallActiveInPopoutWindow()`; if a call was in the popout and then
   leaves it (system close, WA's "Back to chat", picture-in-picture), it clicks WhatsApp's own

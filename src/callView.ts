@@ -341,29 +341,25 @@ export function createCallView(win: BrowserWindow): WebContentsView {
       });
       popout.webContents.on('did-fail-load', (_e, code, desc, url) => console.error('[call-popout] did-fail-load:', code, desc, url));
     }
-    // Auto-close the popout when the call ends/rejects, so a dead call screen never lingers.
-    // Event-driven (no state polling): subscribe to WhatsApp's own CallCollection
-    // 'change:activeCall' — it fires the moment the active call goes away (hang up / reject)
-    // → close the window. A single grace-timeout closes a popout that never gets a call (blank).
-    popout.webContents.on('did-finish-load', () => {
-      popout.webContents.executeJavaScript(`(() => {
-        const req = window.require;
-        const get = () => { try { return req && req('WAWebCallCollection'); } catch (e) { return null; } };
-        const close = () => { try { window.close(); } catch (e) {} };
-        let attached = false, n = 0;
-        const attach = setInterval(() => {
-          const C = get(); n++;
-          if (C && C.on) { attached = true; clearInterval(attach); C.on('change:activeCall', () => { if (!C.activeCall) close(); }); }
-          else if (n > 30) clearInterval(attach);   // give up wiring after ~12s
-        }, 400);
-        // Blank-popout guard: nothing connected within ~25s → close. One-shot, not a poll.
-        setTimeout(() => { const C = get(); if (!C || !C.activeCall) close(); }, 25000);
-      })()`).catch(() => undefined);
-    });
-    // Whenever the popout goes away, make sure the overlay isn't left showing. Ending the
-    // call when the popout is closed/moved is handled by the opener-side watcher (installed
-    // on the call view in createCallView): it ends any call that leaves the popout window.
-    popout.on('closed', () => hideCallLayer());
+    // Auto-close the popout when the call ends. Call state is OPENER-owned: the WA bundle's
+    // WAWebCallCollection is per-window, and this popout gets a FRESH instance whose activeCall
+    // is NEVER set (verified in the decompiled bundle). So watch the OPENER's (wc's) activeCall
+    // from the main process — the old popout-side check read a permanently-empty collection and
+    // force-closed every call at ~25s (the auto-reject bug).
+    const READ_ACTIVE = `(() => { try { return !!window.require('WAWebCallCollection').activeCall; } catch (e) { return false; } })()`;
+    let sawActive = false;
+    const openedAt = Date.now();
+    const poll = setInterval(async () => {
+      if (popout.isDestroyed()) { clearInterval(poll); return; }
+      const active = await wc.executeJavaScript(READ_ACTIVE).catch(() => sawActive);
+      if (active) { sawActive = true; return; }
+      if (sawActive) { clearInterval(poll); popout.close(); }                          // call ended → close
+      else if (Date.now() - openedAt > 25000) { clearInterval(poll); popout.close(); } // never connected → blank cleanup
+    }, 1000);
+    // Whenever the popout goes away, stop polling and make sure the overlay isn't left showing.
+    // Ending the call when the popout is closed/moved is handled by the opener-side guard
+    // (CALL_GUARD_JS): it ends any call that leaves the popout window.
+    popout.on('closed', () => { clearInterval(poll); hideCallLayer(); });
   });
 
   // Esc returns to the chat. Fires only while the call layer has focus (which it does
