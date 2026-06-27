@@ -11,6 +11,9 @@
 
 import { app } from 'electron';
 import type { BridgeFactory, BridgeContext } from '../types';
+import { logoutCallLayer } from '../../callView';
+
+const delay = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 function toBuf(v: unknown): Buffer {
   if (typeof v === 'string') return Buffer.from(v, 'base64');
@@ -47,9 +50,17 @@ function keyStore(
     },
     [clearName]: () => {
       ctx.secretDel(secretName);
-      // ClientKey clear == logout -> full relaunch (App.Restart(UserLogout), doc 21 §5).
+      // ClientKey clear == hybrid logout -> full relaunch (App.Restart(UserLogout), doc 21 §5).
+      // This is the ONLY reliable hybrid-logout signal: the native logout tears the app down via
+      // app.exit here, so web-side detection (polling #pane-side, post_logout nav) never fires.
+      // Before relaunching, unlink the SEPARATE call-layer device too (await its
+      // remove-companion-device IQ) — else app.exit kills it before the unpair reaches the server,
+      // leaving calling linked behind a logged-out app. Capped so a stuck unpair can't block exit.
       // Defer so the IPC reply flushes before the process exits.
-      if (relaunchOnClear) setImmediate(() => { app.relaunch(); app.exit(0); });
+      if (relaunchOnClear) setImmediate(async () => {
+        try { await Promise.race([logoutCallLayer(), delay(8000)]); } catch { /* best-effort */ }
+        app.relaunch(); app.exit(0);
+      });
     },
   };
 }
