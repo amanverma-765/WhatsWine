@@ -4,10 +4,11 @@ import { writeFileSync } from 'node:fs';
 import started from 'electron-squirrel-startup';
 import { appIcon } from './icon';
 import { installSoundPlayer } from './sound';
-import { registerMainWindow, showMainWindow } from './window';
+import { registerMainWindow, registerHybridView, showMainWindow } from './window';
 import { installBridges } from './bridge/registry';
 import { WA_ORIGIN, WA_HOST_ORIGIN, cleanUserAgent } from './waConfig';
-import { createCallView, showCallLayer, hideCallLayer } from './callView';
+import { createCallView, hideCallLayer, logoutCallLayer } from './callView';
+import { watchCallStatus, openCallLinkingWindow } from './callOnboarding';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
 if (started) {
@@ -37,8 +38,17 @@ const WEBVIEW2_VERSION = '120.0.2210.144';
 // harmless for the hybrid window. AudioServiceSandbox causes the OS mic to be
 // unreachable under PulseAudio/PipeWire on Linux (getUserMedia returns a silent
 // zeros track instead of failing — electron#23792). Apply both unconditionally.
-app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer');
+// WebRTCPipeWireCapturer routes screen capture through the xdg-desktop-portal PipeWire
+// screencast on Wayland (doc 41 §363). A second appendSwitch('enable-features', …) would
+// replace, not merge — so keep both features in one comma list.
+app.commandLine.appendSwitch('enable-features', 'SharedArrayBuffer,WebRTCPipeWireCapturer');
 app.commandLine.appendSwitch('disable-features', 'AudioServiceSandbox');
+// Use the native Wayland backend when running under a Wayland compositor, X11 otherwise.
+// Without this Electron runs as an X11 client under XWayland, where GNOME/KDE block X11
+// screen capture → getDisplayMedia returns black frames. `auto` matches Chrome's default.
+// ponytail: `auto` is the documented safe value; gate behind an env var only if it regresses
+// existing window rendering on some compositor.
+app.commandLine.appendSwitch('ozone-platform-hint', 'auto');
 
 function buildUrl(): string {
   const p = new URLSearchParams({
@@ -72,22 +82,36 @@ function updateUnread(title: string) {
   tray?.setToolTip(count > 0 ? `WhatsApp — ${count} unread` : 'WhatsApp');
 }
 
-function createTray() {
-  tray = new Tray(appIcon());
-  tray.setToolTip('WhatsApp');
+// Whether a calling device is currently linked (null = not yet known). Drives the single
+// conditional calling tray item; updated by watchCallStatus.
+let callingLinked: boolean | null = null;
+
+// One calling entry, conditional on link state (consistent Link/Unlink wording). The call layer
+// is never shown as a surface; "Link" only shows the device's QR screen to enable/re-enable calling.
+function callingTrayItem(): Electron.MenuItemConstructorOptions {
+  return callingLinked === true
+    ? { label: 'Unlink calling device', click: () => { logoutCallLayer().catch(() => undefined); } }
+    : { label: 'Link calling device', click: () => { if (mainWindow) openCallLinkingWindow(mainWindow).catch(() => undefined); } };
+}
+
+function refreshTrayMenu() {
+  if (!tray) return;
   tray.setContextMenu(
     Menu.buildFromTemplate([
       // Show WhatsApp must also drop the call layer — otherwise it stays painted
       // on top and raising the window reveals nothing new.
       { label: 'Show WhatsApp', click: () => { hideCallLayer(); showWindow(); } },
-      // Calling always shows the plain-web call layer (a separate linked device
-      // with real WASM-backed calling) as a full-window overlay. "Show WhatsApp"
-      // is the way back to chat — clicking Calling while in calling stays put.
-      { label: 'Calling', click: () => showCallLayer() },
+      callingTrayItem(),
       { type: 'separator' },
       { label: 'Quit', click: () => { isQuitting = true; app.quit(); } },
     ]),
   );
+}
+
+function createTray() {
+  tray = new Tray(appIcon());
+  tray.setToolTip('WhatsApp');
+  refreshTrayMenu();
   tray.on('click', () => {
     if (mainWindow?.isVisible() && mainWindow.isFocused()) mainWindow.hide();
     else { hideCallLayer(); showWindow(); }
@@ -156,6 +180,7 @@ const createWindow = () => {
   mainWindow.contentView.addChildView(hybridView);
 
   const wc = hybridView.webContents;
+  registerHybridView(wc);   // so notification clicks can open chats in the primary window
 
   // Force-grant persistent storage via CDP, exactly like the Windows client's
   // ForcePersistentStoragePermission (doc 31 §3.3) — belt-and-suspenders with the
@@ -260,6 +285,16 @@ const createWindow = () => {
   };
   layout();
   win.on('resize', layout);
+
+  // Live calling-device status banner (Enable prompt when unlinked, connect/reconnect/offline
+  // status when linked) — self-waits for the hybrid login. Skipped under the headless smokes.
+  if (!process.env.HYBRID_SMOKE && !process.env.M0_SMOKE) {
+    watchCallStatus(win, wc, (status) => {
+      // unlinked → no device; loading → unknown (keep current); anything else → a device is linked.
+      const linked = status === 'unlinked' ? false : status === 'loading' ? callingLinked : true;
+      if (linked !== callingLinked) { callingLinked = linked; refreshTrayMenu(); }
+    }).catch(() => undefined);
+  }
 
   if (process.env.HYBRID_SMOKE) runHybridSmoke(wc);
   else if (process.env.M0_SMOKE) runWebSmoke(wc);
