@@ -9,8 +9,10 @@
 // Kept in its own module to avoid a circular-import chain:
 //   main.ts → bridge/registry.ts → impl/voip.ts → callView.ts (no back-edge)
 
-import { BrowserWindow, WebContentsView, session, shell } from 'electron';
+import { BrowserWindow, WebContentsView, Notification, session, shell } from 'electron';
 import { WA_ORIGIN, WA_HOST_ORIGIN, cleanUserAgent } from './waConfig';
+import { appIcon } from './icon';
+import { pickDisplaySource } from './screenPicker';
 
 export const CALL_PARTITION = 'persist:wa-call';
 
@@ -36,6 +38,60 @@ const CALL_SHIMS_JS = `(() => {
         : orig(d);
     }
   } catch (e) { /* permissions patch best-effort */ }
+  // Self-preview: WA's beta web calling UI never renders the sharer their own screen — that
+  // self-view is native-only (IVoipRendering, doc 41 §337) with no web equivalent. Mirror the
+  // already-granted getDisplayMedia stream into a small floating, draggable <video>: no second
+  // capture, so no extra portal prompt and identical behaviour on X11/Wayland. The same stream
+  // is handed back to WA untouched. ponytail: injected shim, same risk class as the AB-prop
+  // shim above; if WA ever ships its own sharer preview, delete this block.
+  try {
+    const md = navigator.mediaDevices;
+    if (md && md.getDisplayMedia && !md.__waPreviewWrapped) {
+      const orig = md.getDisplayMedia.bind(md);
+      const remove = () => { const el = document.getElementById('__wwineSelfPreview'); if (el) el.remove(); };
+      const show = (stream) => {
+        remove();
+        const box = document.createElement('div');
+        box.id = '__wwineSelfPreview';
+        box.style.cssText = 'position:fixed;right:16px;bottom:16px;width:240px;z-index:2147483647;background:#0b141a;border:1px solid #2a3942;border-radius:8px;overflow:hidden;box-shadow:0 4px 16px rgba(0,0,0,.5)';
+        const bar = document.createElement('div');
+        bar.style.cssText = 'display:flex;justify-content:space-between;align-items:center;font:11px system-ui,sans-serif;color:#8696a0;padding:4px 8px;background:#202c33;cursor:move;user-select:none';
+        const title = document.createElement('span');
+        title.textContent = 'Your shared screen';
+        const close = document.createElement('span');
+        close.textContent = '\\u2715';
+        close.style.cssText = 'cursor:pointer;padding:0 4px';
+        close.onclick = remove;
+        bar.appendChild(title); bar.appendChild(close);
+        const vid = document.createElement('video');
+        vid.autoplay = true; vid.muted = true; vid.playsInline = true;
+        vid.style.cssText = 'display:block;width:100%;background:#000';
+        vid.srcObject = stream;
+        if (vid.play) vid.play().catch(() => undefined);
+        box.appendChild(bar); box.appendChild(vid);
+        document.body.appendChild(box);
+        // Drag by the title bar (clamped loosely to the viewport).
+        let dragging = false, sx = 0, sy = 0, ox = 0, oy = 0;
+        bar.addEventListener('mousedown', (e) => {
+          if (e.target === close) return;
+          dragging = true; sx = e.clientX; sy = e.clientY;
+          const r = box.getBoundingClientRect(); ox = r.left; oy = r.top;
+          box.style.right = 'auto'; box.style.bottom = 'auto'; box.style.left = ox + 'px'; box.style.top = oy + 'px';
+          e.preventDefault();
+        });
+        window.addEventListener('mousemove', (e) => {
+          if (!dragging) return;
+          box.style.left = Math.max(0, ox + e.clientX - sx) + 'px';
+          box.style.top = Math.max(0, oy + e.clientY - sy) + 'px';
+        });
+        window.addEventListener('mouseup', () => { dragging = false; });
+        const track = stream.getVideoTracks()[0];
+        if (track) track.addEventListener('ended', remove);
+      };
+      md.getDisplayMedia = async (c) => { const s = await orig(c); try { show(s); } catch (e) { /* preview best-effort */ } return s; };
+      md.__waPreviewWrapped = true;
+    }
+  } catch (e) { /* getDisplayMedia wrap best-effort */ }
   const req = window.require;
   const mod = (name) => { try { return req ? req(name) : null; } catch (e) { return null; } };
   const ON = { enable_web_calling: 1, enable_web_group_calling: 1, web_calling_download_voip: 1, web_calling_init_voip: 1, web_calling_auto_popout_video: 1 };
@@ -103,11 +159,13 @@ function installCallShims(target: Electron.WebContents): void {
 //      .requestOpenChat(wid) (WhatsApp's own "open chat for voip" action);
 //   2. click the chat-header voice/video call button (localized aria-label, with the
 //      locale-independent optionId menu items as fallback);
-//   3. once WAWebCallCollection.activeCall is set, call WAWebVoipUiManager
-//      .openVoipUiPopoutWindow() (no args; reads activeCall itself) — selector-free.
-// Resolves true once the popout is triggered, false on timeout (caller shows the overlay).
+//   3. once WAWebCallCollection.activeCall is set, the call has started — the always-on
+//      auto-popout observer (CALL_OBSERVER_JS) pops it into WhatsApp's own call window.
+// Resolves true once the call has started, false on timeout (caller shows a native toast).
 // ponytail: version-coupled (module names + call-button selector), same risk class as the
-// AB-prop shim; falls back to the overlay if any of it drifts.
+// AB-prop shim; resolves false → caller toasts if any of it drifts. Upgrade path: drive the
+// call via a native VoipBridge.startCall once a real Linux IVoip engine exists (doc 41 §5),
+// retiring this DOM/module automation.
 const startCallJs = (peerJid: string, useVideo: boolean): string => `(() => new Promise((resolve) => {
   const L = (m) => console.warn('[wwine-call] ' + m);
   const req = window.require;
@@ -149,9 +207,14 @@ const startCallJs = (peerJid: string, useVideo: boolean): string => `(() => new 
     n++;
     if (activeCall()) {
       clearInterval(timer);
-      const m = mod('WAWebVoipUiManager');
-      L('activeCall present, popout via UiManager=' + !!m);
-      try { m && m.openVoipUiPopoutWindow(); resolve(!!m); } catch (e) { L('popout threw: ' + e); resolve(false); }
+      // Call started — the always-on auto-popout observer (CALL_OBSERVER_JS) pops it out.
+      // Don't pop out here too, or outgoing + observer could double window.open. But the
+      // observer can only pop out if WAWebVoipUiManager exists, so gate the resolve on it:
+      // missing module → resolve false so placeCall toasts, instead of a call stuck
+      // invisibly in the hidden layer with no feedback (restores the pre-observer signal).
+      const canPopout = !!mod('WAWebVoipUiManager');
+      L('activeCall present → call started; canPopout=' + canPopout);
+      resolve(canPopout);
       return;
     }
     if (!opened) opened = openChat();   // retry open-chat until WA modules have booted
@@ -160,14 +223,19 @@ const startCallJs = (peerJid: string, useVideo: boolean): string => `(() => new 
   }, 400);
 }))()`;
 
-// Opener-side guard installed on the call view: the call must only ever live in its
-// popout window. WhatsApp's WAWebVoipPopoutWindowState.getIsCallActiveInPopoutWindow()
-// tells whether the active call is in the popout. If a call was in the popout and then
-// LEAVES it — user clicks "Back to chat" / picture-in-picture, or closes the popout
-// window — we end the call (click WhatsApp's own End call control) instead of letting it
-// run invisibly in the hidden call layer. Gated so it doesn't fire during pre-popout setup.
-const CALL_GUARD_JS = `(() => {
-  if (window.__wwineCallGuard) return; window.__wwineCallGuard = true;
+// Single opener-side observer on the (hidden) call view. WhatsApp's call UI must ALWAYS
+// live in its own popout window and NEVER as a visible web surface. One 500ms tick reads
+// WAWebCallCollection.activeCall + popout state once and enforces both halves of that:
+//   • active but not yet in the popout  → openVoipUiPopoutWindow() (covers outgoing after
+//     placeCall AND live incoming, which the call-layer linked device rings on its own);
+//   • active, was in the popout, now left it (Back-to-chat / PiP / popout closed) → end the
+//     call (click WA's own End control) so it can't run invisibly in the hidden layer.
+// ponytail: version-coupled to these WA module names (same risk class as the AB-prop shim);
+// if a name drifts the popout just doesn't open — it never falls back to the web UI.
+// Upgrade path: subscribe to WAWebCallCollection's change event instead of polling once a
+// stable event hook is available.
+const CALL_OBSERVER_JS = `(() => {
+  if (window.__wwineCallObserver) return; window.__wwineCallObserver = true;
   const req = window.require;
   const mod = (n) => { try { return req && req(n); } catch (e) { return null; } };
   const endCall = () => {
@@ -178,32 +246,97 @@ const CALL_GUARD_JS = `(() => {
     if (hit) { (hit.closest('[role="button"],button') || hit).click(); return true; }
     return false;
   };
-  let wasInPopout = false;
+  let wasInPopout = false, popping = false;
   setInterval(() => {
-    const C = mod('WAWebCallCollection'), P = mod('WAWebVoipPopoutWindowState');
+    const C = mod('WAWebCallCollection'), U = mod('WAWebVoipUiManager'), P = mod('WAWebVoipPopoutWindowState');
     if (!C || !P || !P.getIsCallActiveInPopoutWindow) return;
-    const active = !!C.activeCall;
+    if (!C.activeCall) { wasInPopout = false; popping = false; return; }   // no call → reset latches
     const inPopout = !!P.getIsCallActiveInPopoutWindow();
-    if (!active) { wasInPopout = false; return; }
-    if (inPopout) { wasInPopout = true; return; }
+    const opening  = !!(P.getIsPopoutWindowOpening && P.getIsPopoutWindowOpening());
+    if (inPopout) { wasInPopout = true; popping = false; return; }         // where we want it
+    if (opening)  { popping = false; return; }                            // popout creating — wait
     if (wasInPopout) {   // call was popped out and has now left the popout → end it
       wasInPopout = false;
       console.warn('[wwine-call] call left popout window → ending call');
       endCall();
+      return;
     }
+    if (popping || !U || !U.openVoipUiPopoutWindow) return;                // requested, or can't pop
+    popping = true;
+    console.warn('[wwine-call] activeCall not in popout → opening popout');
+    try { U.openVoipUiPopoutWindow(); } catch (e) { console.warn('[wwine-call] auto-popout threw: ' + e); popping = false; }
   }, 500);
 })()`;
 
 let callView: WebContentsView | null = null;
 
-/** Show the call layer as a full-window overlay over the chat. No-op until created. */
-export function showCallLayer(): void {
-  callView?.setVisible(true);
+/** The warm call-layer view (or null before creation). Exposed so the call-onboarding
+ *  flow can temporarily reparent it into a dedicated "Link calling device" window to show
+ *  its QR, then move it back. It is the only webContents on the `persist:wa-call` partition,
+ *  so linking it there links the partition the popout/observer use. */
+export function getCallView(): WebContentsView | null {
+  return callView;
 }
 
-/** Hide the call layer, revealing the hybrid chat view beneath. */
+// Truly unlink the call-layer device. WA's "Log out" menu calls require('WAWebSocketModel')
+// .Socket.logout(), which runs a SLOW async chain: await a multi-device sentinel patch (≤~20s) →
+// WAWebUnpairDeviceJob.unpairDevice() sends the `iq xmlns=md remove-companion-device` to
+// s.whatsapp.net (the real removal that drops it from the phone's Linked Devices) → stopComms →
+// clear creds → reload to QR. The earlier code force-wiped storage + reloaded after 3s, which
+// killed the socket BEFORE the unpair IQ was acked — so it logged out locally but the device
+// stayed linked on the account. Fix: explicitly AWAIT unpairDevice (guaranteeing the server
+// removal completes), THEN call Socket.logout() for the local teardown, and never reload/wipe
+// ourselves — WA reloads the view to QR on its own. A local storage wipe can't unlink server-side,
+// so there is intentionally no wipe fallback here.
+// ponytail: version-coupled to WAWebUnpairDeviceJob.unpairDevice + WAWebSocketModel.Socket.logout
+// (same drift class as the rest of the call automation); a rename surfaces as unpair=err in the log.
+const UNPAIR_LOGOUT_JS = `(async () => {
+  const req = window.require;
+  if (!req) return 'no-require';
+  let reason;
+  try { reason = req('WAWebLogoutReasonConstants').LogoutReason.UserInitiated; } catch (e) {}
+  let unpair = 'skipped';
+  try {
+    const J = req('WAWebUnpairDeviceJob');
+    if (J && typeof J.unpairDevice === 'function') { const r = await J.unpairDevice(reason); unpair = 'status:' + (r && r.status); }
+    else unpair = 'no-module';
+  } catch (e) { unpair = 'err:' + e; }
+  let local = 'skipped';
+  try {
+    const S = req('WAWebSocketModel');
+    if (S && S.Socket && typeof S.Socket.logout === 'function') { S.Socket.logout(reason); local = 'logout'; }
+    else local = 'no-module';
+  } catch (e) { local = 'err:' + e; }
+  return 'unpair=' + unpair + ' local=' + local;
+})()`;
+
+/** Truly unlink the call-layer device (server-side remove-companion-device + local teardown) when
+ *  the user logs out of the main hybrid window, so calling doesn't stay linked behind a logged-out
+ *  app. Awaits the unpair so the IQ completes before WA tears the socket down; WA reloads the view
+ *  to QR itself — we never wipe/reload (that was interrupting the unpair). */
+export async function logoutCallLayer(): Promise<void> {
+  if (!callView || callView.webContents.isDestroyed()) return;
+  const status = await callView.webContents.executeJavaScript(UNPAIR_LOGOUT_JS).catch((e) => 'eval-failed:' + e);
+  console.warn('[wwine] call-layer logout →', status);
+}
+
+// Native toast shown when an outgoing-call hand-off to the popout fails. This REPLACES
+// the old green-washed web-overlay fallback: a failed call must never surface the full
+// web.whatsapp.com UI. Calls only ever live in WhatsApp's own popout window now.
+export function notifyCallFailed(): void {
+  if (!Notification.isSupported()) return;
+  new Notification({
+    title: 'Call failed',
+    body: "Couldn't start the call. Try again.",
+    icon: appIcon(),
+  }).show();
+}
+
+/** Defensive: keep the call layer hidden. The layer is only the popout host + call
+ *  automation engine — never a visible surface. Used when the popout window closes. */
 export function hideCallLayer(): void {
-  callView?.setVisible(false);
+  if (!callView) return;
+  callView.setVisible(false);
 }
 
 /**
@@ -220,10 +353,10 @@ export function placeCall(peerJid: string, useVideo: boolean): void {
   // call → pop out) runs in the hidden view, and WhatsApp's popout window is the only visible
   // call surface. React lays out the chat + call button even while the view is hidden, so the
   // jid-open + click still work. userGesture=true so the bundle's window.open isn't blocked.
-  // Only surface the overlay if the hand-off fails, so the click isn't a dead no-op.
+  // On failure show a native toast — never the web overlay (which would leak the web UI).
   wc.executeJavaScript(startCallJs(peerJid, useVideo), true)
-    .then((popped) => { if (!popped) showCallLayer(); })
-    .catch(() => showCallLayer());
+    .then((popped) => { if (!popped) notifyCallFailed(); })
+    .catch(() => notifyCallFailed());
 }
 
 /**
@@ -244,6 +377,7 @@ export function createCallView(win: BrowserWindow): WebContentsView {
     callback(
       permission === 'notifications' ||
       permission === 'media' ||
+      permission === 'display-capture' ||   // getDisplayMedia (screen share); source picked below
       permission === 'clipboard-sanitized-write',
     );
   });
@@ -257,6 +391,15 @@ export function createCallView(win: BrowserWindow): WebContentsView {
     if (['media', 'microphone', 'camera', 'speaker-selection'].includes(permission)) return true;
     return origin === WA_HOST_ORIGIN;
   });
+  // Screen share: WhatsApp's WASM voip engine calls navigator.mediaDevices.getDisplayMedia
+  // (doc 43 §2.5). Electron returns nothing unless we supply a source — useSystemPicker is
+  // macOS-15-only, so on Linux we enumerate + let the user pick (X11) or pass the lone
+  // PipeWire placeholder through to the Wayland portal. Covers the call popout too: it
+  // inherits this session. Cancel → deny (getDisplayMedia rejects; the call keeps running).
+  callSession.setDisplayMediaRequestHandler(async (_request, callback) => {
+    const source = await pickDisplaySource(win);
+    callback(source ? { video: source } : { video: undefined });
+  }, { useSystemPicker: true });
 
   callView = new WebContentsView({
     webPreferences: {
@@ -358,7 +501,7 @@ export function createCallView(win: BrowserWindow): WebContentsView {
     }, 1000);
     // Whenever the popout goes away, stop polling and make sure the overlay isn't left showing.
     // Ending the call when the popout is closed/moved is handled by the opener-side guard
-    // (CALL_GUARD_JS): it ends any call that leaves the popout window.
+    // (CALL_OBSERVER_JS): it ends any call that leaves the popout window.
     popout.on('closed', () => { clearInterval(poll); hideCallLayer(); });
   });
 
@@ -379,7 +522,8 @@ export function createCallView(win: BrowserWindow): WebContentsView {
 
   wc.on('did-finish-load', () => {
     console.log('[call-view] loaded:', wc.getURL());
-    wc.executeJavaScript(CALL_GUARD_JS).catch(() => undefined);   // end any call that leaves its popout
+    // Pop out any active call (outgoing + incoming) and end any that leaves its popout.
+    wc.executeJavaScript(CALL_OBSERVER_JS).catch(() => undefined);
   });
   wc.on('did-fail-load', (_e, code, desc, url) => { console.error('[call-view] did-fail-load:', code, desc, url); });
   // Surface the call view's console (incl. the [call-diag] probe) when diagnosing —
