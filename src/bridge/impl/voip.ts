@@ -25,8 +25,8 @@ import { Notification } from 'electron';
 import type { BridgeFactory, BridgeContext } from '../types';
 import { toWeb } from '../eventtarget';
 import { appIcon } from '../../icon';
-import { showMainWindow } from '../../window';
-import { showCallLayer, placeCall } from '../../callView';
+import { showMainWindow, openChatInHybrid } from '../../window';
+import { placeCall, notifyCallFailed } from '../../callView';
 
 // ─── Incoming-call notification ──────────────────────────────────────────────
 // One toast per caller per ringing window — the offer re-fires per device / re-offer.
@@ -67,16 +67,17 @@ function showIncomingCallToast(ctx: BridgeContext, peerJid: string): void {
   const who = callerLabel(ctx, peerJid);
   const n = new Notification({
     title: 'Incoming WhatsApp call',
-    body: `${who} is calling. Answer here.`,
+    body: `${who} is calling.`,
     icon: appIcon(),
     silent: true,   // the call layer rings natively; no OS notification sound on top
   });
-  n.on('click', () => { showMainWindow(); showCallLayer(); });
+  // A LIVE incoming call pops itself out automatically (callView CALL_OBSERVER_JS — the
+  // call-layer device rings on its own). A STALE one (app opened after the call ended)
+  // has no active call to pop out, so clicking just opens that contact's chat in the
+  // PRIMARY hybrid window — never the plain-web call layer.
+  n.on('click', () => { showMainWindow(); openChatInHybrid(peerJid); });
   n.show();
-  // Raise the main window and flip up the call layer (plain-web second device) so the
-  // user can answer right here. No-op if the call layer isn't created yet.
   showMainWindow();
-  showCallLayer();
 }
 
 // ponytail self-check (WA_VOIP_SELFCHECK=1): jid parse + dedup, no framework.
@@ -178,7 +179,7 @@ function voipBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactory> {
       ctx.log('[VoipBridge] startCall — hand-off to call layer', { peerJid, callId, useVideo }, rest.length, 'more args');
       const peer = String(peerJid ?? '');
       if (peer) placeCall(peer, !!useVideo);
-      else showCallLayer();
+      else notifyCallFailed();   // no jid to dial — never surface the web call layer
     },
 
     // EndCall — tear down active call (doc 41 §3.2).
@@ -193,14 +194,15 @@ function voipBridgeFactory(ctx: BridgeContext): ReturnType<BridgeFactory> {
       ctx.log('[VoipBridge] rejectCallWithoutCallContext (stub)', ...args);
     },
 
-    // StartGroupCall — group call with per-participant device arrays (§3.10). No
-    // dialable deep-link for a group, so just surface the call layer for a manual start.
+    // StartGroupCall — group call with per-participant device arrays (§3.10). There's no
+    // dialable hand-off for a group here, and we never surface the web call layer, so this
+    // can't be honored — toast instead of silently doing nothing.
     startGroupCall: (
       _pnUserJids: unknown, _lidUserJids: unknown, _deviceJidsCsv: unknown,
       callId: unknown, hasVideo: unknown, groupJid: unknown, ...rest: unknown[]
     ) => {
-      ctx.log('[VoipBridge] startGroupCall — surface call layer', { callId, hasVideo, groupJid }, rest.length, 'more args');
-      showCallLayer();
+      ctx.log('[VoipBridge] startGroupCall — no hand-off (web layer suppressed)', { callId, hasVideo, groupJid }, rest.length, 'more args');
+      notifyCallFailed();
     },
 
     // InviteToCall — add participant to an ongoing group call.

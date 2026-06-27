@@ -8,7 +8,7 @@ import type { BridgeFactory, BridgeContext } from '../types';
 import { toWeb } from '../eventtarget';
 import { appIcon } from '../../icon';
 import { playTone as playToneSound, playWaTone } from '../../sound';
-import { showMainWindow } from '../../window';
+import { showMainWindow, openChatInHybrid } from '../../window';
 
 const LAUNCH_TS = Date.now();
 
@@ -82,8 +82,13 @@ function systemIntegrationsBridge(): ReturnType<BridgeFactory> {
       const n = new Notification({ title: header || 'WhatsApp', body: body || 'New message', icon: thumbnailPath || appIcon(), silent: true });
       // ponytail: reply/context actions need libnotify action wiring — basic toast now.
       n.on('click', () => {
-        tw.call('messageNotificationAction', { tag: tag || key, action: 'open', additionalData: '' });
-        showMainWindow();   // bundle switches chat; bring the (maybe tray-hidden) window forward
+        showMainWindow();   // bring the (maybe tray-hidden) window forward
+        // On Linux/Electron the bundle sets the notification `tag` to the chat WID
+        // (jfiYnIUDsGS.js getBannerOptions: macOS→msg.id, else→chat.id), so open that
+        // chat directly in the hybrid window — robust vs the messageNotificationAction
+        // round-trip, which depends on the bundle still holding the message in memory.
+        if (tag && tag.includes('@')) openChatInHybrid(tag);
+        else tw.call('messageNotificationAction', { tag: tag || key, action: 'open', additionalData: '' });
       });
       n.show();
       playWaTone();
