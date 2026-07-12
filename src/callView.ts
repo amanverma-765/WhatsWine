@@ -518,8 +518,12 @@ export function createCallView(win: BrowserWindow): WebContentsView {
   // A1 watchdog feedback: the observer marks a call stuck outside the popout (module
   // drift / silent no-op — covers incoming calls too); surface the native toast, the
   // only non-web feedback path. At most once per call (latched in the observer).
-  wc.on('console-message', (_e, _level, message) => {
-    if (message.includes(WATCHDOG_MARK)) notifyCallFailed();
+  // Tolerates both console-message signatures: legacy (event, level, message) and the
+  // Electron ≥32 params-object form (message arg gone, event.message set) — this listener
+  // must not silently die on an Electron upgrade.
+  wc.on('console-message', (e: Electron.Event & { message?: string }, _level, message?: string) => {
+    const msg = typeof message === 'string' ? message : String(e.message ?? '');
+    if (msg.includes(WATCHDOG_MARK)) notifyCallFailed();
   });
 
   wc.on('did-create-window', (popout) => {
