@@ -1,0 +1,50 @@
+# Flatpak manifest skeleton for WhatsWine (Flathub submission shape).
+# Build locally:  flatpak-builder --user --install --force-clean build-dir packaging/flatpak/com.brightrays.WhatsWine.yml
+# Flathub submission: PR this manifest + metainfo to github.com/flathub/flathub (see PACKAGING.md,
+# including the trademark caveat — the vendored WhatsApp icon will likely need replacing first).
+app-id: com.brightrays.WhatsWine
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+base: org.electronjs.Electron2.BaseApp
+base-version: '24.08'
+command: whatswine.sh
+separate-locales: false
+finish-args:
+  - --share=ipc
+  - --share=network
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --device=dri
+  - --talk-name=org.freedesktop.Notifications
+  - --talk-name=org.kde.StatusNotifierWatcher   # tray
+  - --env=ELECTRON_OZONE_PLATFORM_HINT=auto
+modules:
+  - name: whatswine
+    buildsystem: simple
+    build-commands:
+      # Repack the zip artifact produced by `npm run make:linux` (out/make/zip/linux/x64/).
+      # The zip nests everything under a WhatsWine-linux-x64/ top dir — strip it, or the
+      # launcher's /app/whatswine/WhatsWine path won't exist.
+      # Inside flatpak there is no setuid sandbox; zypak (in the Electron BaseApp) wraps it.
+      - unzip whatswine.zip -d unpacked
+      - mkdir -p /app/whatswine && cp -a unpacked/*/. /app/whatswine/
+      - install -Dm755 whatswine.sh /app/bin/whatswine.sh
+      - install -Dm644 com.brightrays.WhatsWine.metainfo.xml -t /app/share/metainfo
+      - install -Dm644 icon.png /app/share/icons/hicolor/512x512/apps/com.brightrays.WhatsWine.png
+      - install -Dm644 com.brightrays.WhatsWine.desktop -t /app/share/applications
+    sources:
+      - type: file
+        path: ../../out/make/zip/linux/x64/WhatsWine-linux-x64-1.0.0.zip
+        dest-filename: whatswine.zip
+      - type: script
+        dest-filename: whatswine.sh
+        commands:
+          - exec zypak-wrapper /app/whatswine/WhatsWine "$@"
+      - type: file
+        path: ../../assets/icon.png
+      - type: file
+        path: com.brightrays.WhatsWine.metainfo.xml
+      - type: file
+        path: com.brightrays.WhatsWine.desktop

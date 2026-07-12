@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata — required by Flathub; also improves GNOME Software / Discover
+     listings for the deb/rpm if installed to /usr/share/metainfo. -->
+<component type="desktop-application">
+  <id>com.brightrays.WhatsWine</id>
+  <name>WhatsWine</name>
+  <summary>Unofficial WhatsApp desktop client</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      WhatsWine is an unofficial WhatsApp desktop client for Linux. It ports the
+      native WhatsApp-for-Windows hybrid architecture to Electron: the real
+      WhatsApp Web bundle runs against native bridges for SQLite persistence,
+      notifications, and system integration, with real 1:1 voice and video
+      calling, screen sharing, and tray support.
+    </p>
+    <p>
+      This project is not affiliated with, endorsed by, or supported by WhatsApp
+      LLC or Meta Platforms, Inc.
+    </p>
+  </description>
+  <launchable type="desktop-id">com.brightrays.WhatsWine.desktop</launchable>
+  <url type="homepage">https://github.com/amanverma-765/WhatsWine</url>
+  <url type="bugtracker">https://github.com/amanverma-765/WhatsWine/issues</url>
+  <developer id="com.brightrays"><name>amanverma-765</name></developer>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+    <content_attribute id="social-audio">intense</content_attribute>
+    <content_attribute id="social-contacts">intense</content_attribute>
+  </content_rating>
+  <releases>
+    <release version="1.0.0" date="2026-07-13"/>
+  </releases>
+</component>

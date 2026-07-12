@@ -1,0 +1,27 @@
+# Maintainer: amanverma-765 <akverma4aman@gmail.com>
+# AUR binary package: repacks the released .deb (the usual pattern for Electron
+# apps on AUR, cf. slack-desktop-bin / signal-desktop-bin). Bump pkgver + sha256
+# on each release; publish by pushing this file (+ .SRCINFO) to the AUR repo:
+#   git clone ssh://aur@aur.archlinux.org/whatswine-bin.git
+#   makepkg --printsrcinfo > .SRCINFO && git add -A && git commit && git push
+pkgname=whatswine-bin
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Unofficial WhatsApp desktop client for Linux — Electron shell over WhatsApp Web's Windows-hybrid bundle"
+arch=('x86_64')
+url="https://github.com/amanverma-765/WhatsWine"
+license=('MIT')
+provides=('whatswine')
+conflicts=('whatswine')
+depends=('gtk3' 'nss' 'alsa-lib' 'libnotify' 'libxss' 'libxtst' 'xdg-utils')
+options=('!strip')  # Electron binaries are pre-stripped; stripping breaks the asar integrity fuse
+source=("${url}/releases/download/v${pkgver}/whatswine_${pkgver}_amd64.deb")
+sha256sums=('SKIP')  # replace with the real sha256 of each release
+
+package() {
+  # The deb's data.tar contains usr/lib/whatswine + usr/share entries; extract as-is.
+  bsdtar -xf data.tar.* -C "${pkgdir}"
+  # chrome-sandbox must be setuid root for the Chromium sandbox without userns.
+  chmod 4755 "${pkgdir}/usr/lib/whatswine/chrome-sandbox"
+  install -Dm644 "${pkgdir}/usr/lib/whatswine/LICENSE"* -t "${pkgdir}/usr/share/licenses/${pkgname}/" 2>/dev/null || true
+}

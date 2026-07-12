@@ -1,0 +1,57 @@
+# Snap skeleton for WhatsWine. Build: `snapcraft` from the repo root with this file
+# at snap/snapcraft.yaml (or `snapcraft --project-dir packaging/snap` on newer snapcraft).
+# Publish: `snapcraft login && snapcraft upload --release=stable *.snap` (name must be
+# registered first: `snapcraft register whatswine`). See PACKAGING.md for the trademark
+# caveat before publishing to the public Snap Store.
+name: whatswine
+version: '1.0.0'
+summary: Unofficial WhatsApp desktop client
+description: |
+  WhatsWine is an unofficial WhatsApp desktop client for Linux — an Electron
+  shell over WhatsApp Web's Windows-hybrid bundle, with native persistence,
+  notifications, tray, and real 1:1 voice/video calling with screen share.
+  Not affiliated with WhatsApp LLC or Meta Platforms, Inc.
+base: core24
+confinement: strict
+grade: stable
+compression: lzo
+
+apps:
+  whatswine:
+    command: whatswine/WhatsWine --no-sandbox
+    desktop: whatswine/whatswine.desktop
+    extensions: [gnome]
+    plugs:
+      - audio-playback
+      - audio-record
+      - browser-support   # provides the Chromium sandbox story under strict confinement
+      - camera
+      - desktop
+      - desktop-legacy
+      - home
+      - network
+      - opengl
+      - screen-inhibit-control
+      - unity7
+      - wayland
+      - x11
+
+parts:
+  whatswine:
+    plugin: dump
+    # Repack the zip produced by `npm run make:linux`; copy it next to this file first.
+    # The zip nests everything under WhatsWine-linux-x64/ — organize strips that dir.
+    source: WhatsWine-linux-x64-1.0.0.zip
+    organize:
+      'WhatsWine-linux-x64/*': whatswine/
+    stage-packages:
+      - libnss3
+      - libnotify4
+  desktop-file:
+    plugin: dump
+    # The zip carries no .desktop (only the deb/rpm makers emit one); reuse the flatpak one.
+    source: ../flatpak
+    organize:
+      'com.brightrays.WhatsWine.desktop': whatswine/whatswine.desktop
+    stage:
+      - whatswine/whatswine.desktop
