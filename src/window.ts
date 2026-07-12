@@ -1,4 +1,5 @@
 import { BrowserWindow, WebContents } from 'electron';
+import { MOD_JS } from './waConfig';
 
 // The hybrid main window reference, registered by main.ts after createWindow().
 // Kept here so voip.ts (and any other bridge impl) can call showMainWindow() without
@@ -34,10 +35,10 @@ export function openChatInHybrid(jid: string): void {
   }
   const js = `(() => {
     const w = window;
+    ${MOD_JS}
     w.__wwineOpenChatTarget = ${JSON.stringify(jid)};   // latest request wins
     const run = () => {
-      const req = w.require; if (!req) return false;
-      let W, A; try { W = req('WAWebWidFactory'); A = req('WAWebVoipActionRequestOpenChat'); } catch (e) { return false; }
+      const W = mod('WAWebWidFactory'), A = mod('WAWebVoipActionRequestOpenChat');
       if (!W || !A) return false;
       try { A.requestOpenChat(W.createWid(w.__wwineOpenChatTarget)); }
       catch (e) { console.warn('[wwine] openChat threw: ' + e); }

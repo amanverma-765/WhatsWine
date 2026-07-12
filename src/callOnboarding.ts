@@ -12,6 +12,7 @@
 
 import { BrowserWindow, Notification, dialog } from 'electron';
 import { getCallView, setCallViewReparented } from './callView';
+import { MOD_JS, WA_BG } from './waConfig';
 import { appIcon } from './icon';
 
 type BannerSpec = { bg: string; text: string; button?: string; autoHideMs?: number };
@@ -57,8 +58,7 @@ const REMOVE_BANNER_JS = `(() => { const b = document.getElementById('__wwineLin
 // ponytail: version-coupled to WAWebStreamModel.Stream (+ Socket fallback); a rename degrades to the
 // #pane-side fallback (connected/unlinked only) — never crashes, never leaks the web UI.
 const STATUS_JS = `(() => {
-  const req = window.require;
-  const mod = (n) => { try { return req && req(n); } catch (e) { return null; } };
+  ${MOD_JS}
   let status = 'loading';
   try {
     const SM = mod('WAWebStreamModel');
@@ -91,16 +91,17 @@ const STATUS_JS = `(() => {
 // it also offsets the stable React root #app by the bar height in lockstep — covering both a
 // static (margin-top/height) and a fixed (top/height) #app layout, animated to match the slide.
 // The bar is appended to <html> (outside React's <body>) so WA's SPA re-renders never wipe it.
-// ponytail: 34px hard-coded to match the bar height; if the bar height changes, change both.
+const BAR_H = 34;   // bar height AND the #app offset — interpolated into both so they can't drift
 const applyBannerJs = (spec: BannerSpec | null): string => `(() => {
   const spec = ${JSON.stringify(spec)};
+  const specStr = JSON.stringify(spec);
   const ID = '__wwineCallBar', SID = '__wwineBarStyle';
   const TRANS = 'transition:margin-top .35s ease,height .35s ease !important';
   const setOffset = (on) => {
     let s = document.getElementById(SID);
     if (on) {
       if (!s) { s = document.createElement('style'); s.id = SID; (document.head || document.documentElement).appendChild(s); }
-      s.textContent = '#app{margin-top:34px !important;height:calc(100% - 34px) !important;box-sizing:border-box !important;' + TRANS + '}';
+      s.textContent = '#app{margin-top:${BAR_H}px !important;height:calc(100% - ${BAR_H}px) !important;box-sizing:border-box !important;' + TRANS + '}';
     } else if (s) {
       s.textContent = '#app{margin-top:0 !important;height:100% !important;' + TRANS + '}';
       setTimeout(() => { const x = document.getElementById(SID); if (x) x.remove(); }, 380);
@@ -117,11 +118,11 @@ const applyBannerJs = (spec: BannerSpec | null): string => `(() => {
   if (!bar) {
     bar = document.createElement('div');
     bar.id = ID;
-    bar.style.cssText = 'position:fixed;top:0;left:0;right:0;height:34px;z-index:2147483647;color:#fff;font:13px/34px system-ui,sans-serif;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.35);transform:translateY(-100%);transition:transform .35s ease';
+    bar.style.cssText = 'position:fixed;top:0;left:0;right:0;height:${BAR_H}px;z-index:2147483647;color:#fff;font:13px/${BAR_H}px system-ui,sans-serif;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.35);transform:translateY(-100%);transition:transform .35s ease';
     document.documentElement.appendChild(bar);
   }
-  if (bar.dataset.spec === JSON.stringify(spec)) return;   // unchanged → no rebuild
-  bar.dataset.spec = JSON.stringify(spec);
+  if (bar.dataset.spec === specStr) return;   // unchanged → no rebuild
+  bar.dataset.spec = specStr;
   bar.style.background = spec.bg;
   bar.textContent = spec.text;
   if (spec.button) {
@@ -135,7 +136,7 @@ const applyBannerJs = (spec: BannerSpec | null): string => `(() => {
   else bar.style.transform = 'translateY(0)';
   if (spec.autoHideMs) setTimeout(() => {
     const b = document.getElementById(ID);
-    if (b && b.dataset.spec === JSON.stringify(spec)) { setOffset(false); b.style.transform = 'translateY(-100%)'; setTimeout(() => b.remove(), 350); }
+    if (b && b.dataset.spec === specStr) { setOffset(false); b.style.transform = 'translateY(-100%)'; setTimeout(() => b.remove(), 350); }
   }, spec.autoHideMs);
 })()`;
 
@@ -202,7 +203,7 @@ export async function openCallLinkingWindow(mainWindow: BrowserWindow): Promise<
     title: 'Link calling device',
     autoHideMenuBar: true,
     icon: appIcon(),
-    backgroundColor: '#111b21',
+    backgroundColor: WA_BG,
   });
 
   // Reparent the warm view into the link window and size it to the window. The flag

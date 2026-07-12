@@ -58,18 +58,11 @@ Status legend: **DECISION** = needs a product/behavior call before fixing ·
 
 ---
 
-## B. Deferred cleanup — no decision, skipped as low-value churn (2)
+## B. Deferred cleanup — no decision, skipped as low-value churn (1)
 
-### B1. `mod()` require-wrapper duplicated across injected scripts
-- **Where:** `src/window.ts` (`openChatInHybrid`), `src/callView.ts`
-  (`CALL_SHIMS_JS`, `CALL_DIAG_JS`, `startCallJs`, `CALL_OBSERVER_JS`).
-- **Problem:** `const mod = (n) => { try { return req(n); } catch (e) { return null; } }`
-  is hand-inlined ~5×. (The guard+popout merge already removed one copy.)
-- **Fix:** hoist one `const MOD_JS = "const mod=(n)=>{try{return req(n)}catch(e){return null}};"`
-  string and prepend it in each injected script. ≈ −8 lines.
-- **Why deferred:** spreads a shared string across two files and rewrites **pre-existing**
-  scripts (`CALL_SHIMS_JS`, `CALL_DIAG_JS`) outside this change's intent. Low value vs churn.
-  Do it only if these scripts get reworked anyway.
+### ~~B1. `mod()` require-wrapper duplicated across injected scripts~~ — DONE
+Hoisted as `MOD_JS` in `src/waConfig.ts`, interpolated into every injected script
+(`callView.ts` ×4, `callOnboarding.ts` `STATUS_JS`, `window.ts` `openChatInHybrid`).
 
 ### B2. `tag.includes('@')` is a loose JID test
 - **Where:** `src/bridge/impl/startup.ts` notification `click` handler.

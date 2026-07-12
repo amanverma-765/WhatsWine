@@ -6,7 +6,7 @@ import { appIcon } from './icon';
 import { installSoundPlayer } from './sound';
 import { registerMainWindow, registerHybridView, showMainWindow } from './window';
 import { installBridges } from './bridge/registry';
-import { WA_ORIGIN, WA_HOST_ORIGIN, cleanUserAgent } from './waConfig';
+import { WA_ORIGIN, WA_HOST_ORIGIN, WA_BG, cleanUserAgent } from './waConfig';
 import { createCallView, hideCallLayer, logoutCallLayer, isCallViewReparented } from './callView';
 import { watchCallStatus, openCallLinkingWindow } from './callOnboarding';
 
@@ -82,14 +82,14 @@ function updateUnread(title: string) {
   tray?.setToolTip(count > 0 ? `WhatsApp — ${count} unread` : 'WhatsApp');
 }
 
-// Whether a calling device is currently linked (null = not yet known). Drives the single
-// conditional calling tray item; updated by watchCallStatus.
-let callingLinked: boolean | null = null;
+// Whether a calling device is currently linked (starts false — same tray item as unlinked).
+// Drives the single conditional calling tray item; updated by watchCallStatus.
+let callingLinked = false;
 
 // One calling entry, conditional on link state (consistent Link/Unlink wording). The call layer
 // is never shown as a surface; "Link" only shows the device's QR screen to enable/re-enable calling.
 function callingTrayItem(): Electron.MenuItemConstructorOptions {
-  return callingLinked === true
+  return callingLinked
     ? { label: 'Unlink calling device', click: () => { logoutCallLayer().catch(() => undefined); } }
     : { label: 'Link calling device', click: () => { if (mainWindow) openCallLinkingWindow(mainWindow).catch(() => undefined); } };
 }
@@ -156,7 +156,7 @@ const createWindow = () => {
     minHeight: 600,
     autoHideMenuBar: true,
     icon: appIcon(),
-    backgroundColor: '#111b21',   // WA dark, shown behind the views before first paint
+    backgroundColor: WA_BG,   // shown behind the views before first paint
   });
 
   registerMainWindow(mainWindow);
@@ -292,8 +292,8 @@ const createWindow = () => {
   // status when linked) — self-waits for the hybrid login. Skipped under the headless smokes.
   if (!process.env.HYBRID_SMOKE && !process.env.M0_SMOKE) {
     watchCallStatus(win, wc, (status) => {
-      // unlinked → no device; loading → unknown (keep current); anything else → a device is linked.
-      const linked = status === 'unlinked' ? false : status === 'loading' ? callingLinked : true;
+      if (status === 'loading') return;   // unknown — keep the current tray item
+      const linked = status !== 'unlinked';
       if (linked !== callingLinked) { callingLinked = linked; refreshTrayMenu(); }
     }).catch(() => undefined);
   }

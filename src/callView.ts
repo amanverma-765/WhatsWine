@@ -10,7 +10,7 @@
 //   main.ts → bridge/registry.ts → impl/voip.ts → callView.ts (no back-edge)
 
 import { BrowserWindow, WebContentsView, Notification, session, shell } from 'electron';
-import { WA_ORIGIN, WA_HOST_ORIGIN, cleanUserAgent } from './waConfig';
+import { WA_ORIGIN, WA_HOST_ORIGIN, MOD_JS, cleanUserAgent } from './waConfig';
 import { appIcon } from './icon';
 import { pickDisplaySource } from './screenPicker';
 
@@ -99,8 +99,7 @@ const CALL_SHIMS_JS = `(() => {
       md.__waPreviewWrapped = true;
     }
   } catch (e) { /* getDisplayMedia wrap best-effort */ }
-  const req = window.require;
-  const mod = (name) => { try { return req ? req(name) : null; } catch (e) { return null; } };
+  ${MOD_JS}
   const ON = { enable_web_calling: 1, enable_web_group_calling: 1, web_calling_download_voip: 1, web_calling_init_voip: 1, web_calling_auto_popout_video: 1 };
   const force = () => {
     const AB = mod('WAWebABProps');
@@ -131,8 +130,7 @@ const CALL_DIAG_JS = `(() => {
     Atomics: typeof Atomics,
     RTCPeerConnection: typeof RTCPeerConnection
   }));
-  const req = window.require;
-  const mod = (name) => { try { return req ? req(name) : null; } catch (e) { return null; } };
+  ${MOD_JS}
   let n = 0;
   const timer = setInterval(() => {
     n++;
@@ -175,8 +173,7 @@ function installCallShims(target: Electron.WebContents): void {
 // retiring this DOM/module automation.
 const startCallJs = (peerJid: string, useVideo: boolean): string => `(() => new Promise((resolve) => {
   const L = (m) => console.warn('[wwine-call] ' + m);
-  const req = window.require;
-  const mod = (name) => { try { return req ? req(name) : null; } catch (e) { L('require ' + name + ' threw: ' + e); return null; } };
+  ${MOD_JS}
   L('start jid=${peerJid} video=${useVideo} hasRequire=' + (typeof req));
   const rx = ${useVideo ? '/video call/i' : '/voice call/i'};
   const optId = ${useVideo ? "'video-call'" : "'voice-call'"};
@@ -243,8 +240,7 @@ const startCallJs = (peerJid: string, useVideo: boolean): string => `(() => new 
 // stable event hook is available.
 const CALL_OBSERVER_JS = `(() => {
   if (window.__wwineCallObserver) return; window.__wwineCallObserver = true;
-  const req = window.require;
-  const mod = (n) => { try { return req && req(n); } catch (e) { return null; } };
+  ${MOD_JS}
   const endCall = () => {
     const rx = /\\b(end call|leave call|hang up)\\b/i;
     const els = Array.from(document.querySelectorAll('[aria-label],[title]'));

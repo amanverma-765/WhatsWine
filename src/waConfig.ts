@@ -9,6 +9,16 @@ import { app } from 'electron';
 export const WA_ORIGIN = 'https://web.whatsapp.com/';
 export const WA_HOST_ORIGIN = new URL(WA_ORIGIN).origin; // 'https://web.whatsapp.com'
 
+// WA's dark background — used as the pre-paint backgroundColor of every window/dialog
+// so there is no white flash before the web content renders.
+export const WA_BG = '#111b21';
+
+// Injected-JS prelude shared by every script that reaches into WA's module registry:
+// a guarded require lookup that returns null (never throws) when the page hasn't booted
+// or a module name has drifted. Interpolate at the top of the script string.
+export const MOD_JS =
+  'const req = window.require; const mod = (n) => { try { return req ? req(n) : null; } catch (e) { return null; } };';
+
 // WhatsApp Web rejects/deprecates unknown user agents; drop the `Electron` token
 // and the app-name token (e.g. "WhatsWine/1.0.0") so it sees a vanilla Chrome
 // (keeping the real Chromium version). Built from app.getName() so a productName

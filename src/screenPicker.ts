@@ -6,6 +6,7 @@
 // the OS portal does the real pick — so we auto-pass a lone source straight through.
 
 import { BrowserWindow, desktopCapturer, ipcMain } from 'electron';
+import { WA_BG } from './waConfig';
 
 const PICK_CHANNEL = 'wwine:screen-pick';
 
@@ -44,7 +45,7 @@ export async function pickDisplaySource(
     autoHideMenuBar: true,
     minimizable: false,
     maximizable: false,
-    backgroundColor: '#111b21',
+    backgroundColor: WA_BG,
     webPreferences: {
       // ponytail: local trusted data-URL chooser (no remote content ever loads here), so
       // nodeIntegration/contextIsolation-off lets the inline script use ipcRenderer directly
@@ -84,7 +85,7 @@ function pickerHtml(
 ): string {
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
   :root { color-scheme: dark; }
-  body { margin:0; font:14px system-ui,sans-serif; background:#111b21; color:#e9edef;
+  body { margin:0; font:14px system-ui,sans-serif; background:${WA_BG}; color:#e9edef;
          display:flex; flex-direction:column; height:100vh; }
   h1 { font-size:15px; font-weight:600; margin:0; padding:14px 18px; border-bottom:1px solid #222d34; }
   .grid { flex:1; overflow:auto; display:grid; gap:12px; padding:16px;
