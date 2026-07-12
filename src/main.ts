@@ -7,7 +7,7 @@ import { installSoundPlayer } from './sound';
 import { registerMainWindow, registerHybridView, showMainWindow } from './window';
 import { installBridges } from './bridge/registry';
 import { WA_ORIGIN, WA_HOST_ORIGIN, cleanUserAgent } from './waConfig';
-import { createCallView, hideCallLayer, logoutCallLayer } from './callView';
+import { createCallView, hideCallLayer, logoutCallLayer, isCallViewReparented } from './callView';
 import { watchCallStatus, openCallLinkingWindow } from './callOnboarding';
 
 // Handle creating/removing shortcuts on Windows when installing/uninstalling.
@@ -281,7 +281,9 @@ const createWindow = () => {
   const layout = () => {
     const { width, height } = win.getContentBounds();
     hybridView.setBounds({ x: 0, y: 0, width, height });
-    callView.setBounds({ x: 0, y: 0, width, height });
+    // While the link window borrows the call view, ITS resize handler owns the bounds —
+    // setBounds is parent-relative, so sizing to the main window would blow up the QR.
+    if (!isCallViewReparented()) callView.setBounds({ x: 0, y: 0, width, height });
   };
   layout();
   win.on('resize', layout);

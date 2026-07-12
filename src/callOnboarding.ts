@@ -11,7 +11,7 @@
 // No back-edge into main.ts — main.ts imports US (keeps the bridge import chain acyclic).
 
 import { BrowserWindow, Notification, dialog } from 'electron';
-import { getCallView } from './callView';
+import { getCallView, setCallViewReparented } from './callView';
 import { appIcon } from './icon';
 
 type BannerSpec = { bg: string; text: string; button?: string; autoHideMs?: number };
@@ -205,7 +205,10 @@ export async function openCallLinkingWindow(mainWindow: BrowserWindow): Promise<
     backgroundColor: '#111b21',
   });
 
-  // Reparent the warm view into the link window and size it to the window.
+  // Reparent the warm view into the link window and size it to the window. The flag
+  // disarms the main window's hide/resize paths (Esc → hideCallLayer, popout-closed,
+  // title watcher, main.ts layout) so none of them blank or mis-size the QR mid-linking.
+  setCallViewReparented(true);
   mainWindow.contentView.removeChildView(view);
   linkWin.contentView.addChildView(view);
   const layout = () => {
@@ -233,6 +236,7 @@ export async function openCallLinkingWindow(mainWindow: BrowserWindow): Promise<
     // Move the warm view BACK to the main window (hidden) before the link window is destroyed.
     try { linkWin.contentView.removeChildView(view); } catch { /* already detached */ }
     mainWindow.contentView.addChildView(view);
+    setCallViewReparented(false);
     const { width, height } = mainWindow.getContentBounds();
     view.setBounds({ x: 0, y: 0, width, height });
     if (linked && Notification.isSupported()) {
@@ -265,7 +269,10 @@ export async function watchCallStatus(
 ): Promise<void> {
   if (!(await waitLoggedIn(hybridWc, 120_000))) return;   // main never logged in this session
   let last: string | null = null;
+  let reassert = 0;
   const apply = (spec: BannerSpec | null) => hybridWc.executeJavaScript(applyBannerJs(spec)).catch(() => undefined);
+  // Read-and-clear in one round-trip (was a read + a separate clear write per Enable click).
+  const READ_ACTION_JS = "(() => { const a = window.__wwineCallingAction || ''; window.__wwineCallingAction = ''; return a; })()";
   const poll = setInterval(async () => {
     if (hybridWc.isDestroyed() || mainWindow.isDestroyed()) { clearInterval(poll); return; }
 
@@ -273,25 +280,27 @@ export async function watchCallStatus(
     // hybrid banner and leave status alone until it closes (then `last` forces a fresh banner).
     if (linkingInProgress) { if (last !== '__linking') { last = '__linking'; apply(null); } return; }
 
-    // The Enable button lives in the HYBRID page, so read the action HERE (not from the call view).
-    const action = await hybridWc.executeJavaScript("window.__wwineCallingAction || ''").catch(() => '');
+    // The Enable button lives in the HYBRID page, so the action is read there while the status
+    // comes from the CALL view — independent webContents, so overlap the two round-trips.
+    const view = getCallView();
+    const [action, status] = await Promise.all([
+      hybridWc.executeJavaScript(READ_ACTION_JS).catch(() => ''),
+      view && !view.webContents.isDestroyed()
+        ? view.webContents.executeJavaScript(STATUS_JS).then(String).catch(() => 'loading')
+        : Promise.resolve('loading'),
+    ]);
     if (action === 'enable') {
-      await hybridWc.executeJavaScript("window.__wwineCallingAction = ''").catch(() => undefined);
       openCallLinkingWindow(mainWindow).catch(() => undefined);
       return;   // subsequent ticks see linkingInProgress
     }
 
-    const view = getCallView();
-    const status = view && !view.webContents.isDestroyed()
-      ? String(await view.webContents.executeJavaScript(STATUS_JS).catch(() => 'loading'))
-      : 'loading';
     const spec = BANNER_SPECS[status] ?? null;
     if (status !== last) {
       last = status;
       apply(spec);
       onStatus?.(status);
-    } else if (spec && !spec.autoHideMs) {
-      apply(spec);   // re-assert persistent banner in case WA wiped the node
+    } else if (spec && !spec.autoHideMs && ++reassert % 5 === 0) {
+      apply(spec);   // occasional re-assert in case WA's SPA wiped the node (applyBannerJs no-ops when unchanged)
     }
   }, 1500);
 }

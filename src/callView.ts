@@ -48,7 +48,11 @@ const CALL_SHIMS_JS = `(() => {
     const md = navigator.mediaDevices;
     if (md && md.getDisplayMedia && !md.__waPreviewWrapped) {
       const orig = md.getDisplayMedia.bind(md);
-      const remove = () => { const el = document.getElementById('__wwineSelfPreview'); if (el) el.remove(); };
+      let dragCleanup = null;
+      const remove = () => {
+        const el = document.getElementById('__wwineSelfPreview'); if (el) el.remove();
+        if (dragCleanup) { dragCleanup(); dragCleanup = null; }
+      };
       const show = (stream) => {
         remove();
         const box = document.createElement('div');
@@ -79,12 +83,15 @@ const CALL_SHIMS_JS = `(() => {
           box.style.right = 'auto'; box.style.bottom = 'auto'; box.style.left = ox + 'px'; box.style.top = oy + 'px';
           e.preventDefault();
         });
-        window.addEventListener('mousemove', (e) => {
+        const onMove = (e) => {
           if (!dragging) return;
           box.style.left = Math.max(0, ox + e.clientX - sx) + 'px';
           box.style.top = Math.max(0, oy + e.clientY - sy) + 'px';
-        });
-        window.addEventListener('mouseup', () => { dragging = false; });
+        };
+        const onUp = () => { dragging = false; };
+        window.addEventListener('mousemove', onMove);
+        window.addEventListener('mouseup', onUp);
+        dragCleanup = () => { window.removeEventListener('mousemove', onMove); window.removeEventListener('mouseup', onUp); };
         const track = stream.getVideoTracks()[0];
         if (track) track.addEventListener('ended', remove);
       };
@@ -246,29 +253,53 @@ const CALL_OBSERVER_JS = `(() => {
     if (hit) { (hit.closest('[role="button"],button') || hit).click(); return true; }
     return false;
   };
-  let wasInPopout = false, popping = false;
+  // popping is a tick-countdown latch, not a boolean: it must survive the 'opening' phase
+  // (a boolean cleared on 'opening' re-armed the moment opening flipped false before
+  // inPopout flipped true → double openVoipUiPopoutWindow), yet still expire so a silent
+  // no-op open gets retried (~5s later) instead of latching forever.
+  let wasInPopout = false, popping = 0;
   setInterval(() => {
     const C = mod('WAWebCallCollection'), U = mod('WAWebVoipUiManager'), P = mod('WAWebVoipPopoutWindowState');
     if (!C || !P || !P.getIsCallActiveInPopoutWindow) return;
-    if (!C.activeCall) { wasInPopout = false; popping = false; return; }   // no call → reset latches
+    if (!C.activeCall) { wasInPopout = false; popping = 0; return; }   // no call → reset latches
     const inPopout = !!P.getIsCallActiveInPopoutWindow();
     const opening  = !!(P.getIsPopoutWindowOpening && P.getIsPopoutWindowOpening());
-    if (inPopout) { wasInPopout = true; popping = false; return; }         // where we want it
-    if (opening)  { popping = false; return; }                            // popout creating — wait
+    if (inPopout) { wasInPopout = true; popping = 0; return; }         // where we want it
+    if (opening)  return;                                              // popout creating — wait
     if (wasInPopout) {   // call was popped out and has now left the popout → end it
       wasInPopout = false;
       console.warn('[wwine-call] call left popout window → ending call');
       endCall();
       return;
     }
-    if (popping || !U || !U.openVoipUiPopoutWindow) return;                // requested, or can't pop
-    popping = true;
+    if (popping > 0 && --popping) return;                              // requested recently — wait
+    if (!U || !U.openVoipUiPopoutWindow) return;                       // can't pop
+    popping = 10;
     console.warn('[wwine-call] activeCall not in popout → opening popout');
-    try { U.openVoipUiPopoutWindow(); } catch (e) { console.warn('[wwine-call] auto-popout threw: ' + e); popping = false; }
+    try { U.openVoipUiPopoutWindow(); } catch (e) { console.warn('[wwine-call] auto-popout threw: ' + e); popping = 0; }
   }, 500);
 })()`;
 
 let callView: WebContentsView | null = null;
+
+// The live call popout window (WhatsApp's own call surface), tracked so dialogs raised
+// mid-call (screen-share picker) can parent to it instead of the possibly-hidden main window.
+let activePopout: BrowserWindow | null = null;
+
+// True while the call view is borrowed into the "Link calling device" window. Guards every
+// hide/resize path owned by the MAIN window (Esc handler, popout-closed, title watcher,
+// main.ts layout) so none of them can blank or mis-size the QR mid-linking.
+let reparented = false;
+
+/** callOnboarding.ts marks the view reparented while the link window borrows it. */
+export function setCallViewReparented(v: boolean): void {
+  reparented = v;
+}
+
+/** main.ts layout: skip sizing the call view while the link window owns it. */
+export function isCallViewReparented(): boolean {
+  return reparented;
+}
 
 /** The warm call-layer view (or null before creation). Exposed so the call-onboarding
  *  flow can temporarily reparent it into a dedicated "Link calling device" window to show
@@ -293,6 +324,14 @@ export function getCallView(): WebContentsView | null {
 const UNPAIR_LOGOUT_JS = `(async () => {
   const req = window.require;
   if (!req) return 'no-require';
+  // Never-linked fast path: at QR/PAIRING there is no companion device to unpair, and the
+  // unpair chain would just stall against a socket that isn't logged in — don't make the
+  // user's logout-relaunch wait out the 8s cap for nothing.
+  try {
+    const SM = req('WAWebStreamModel');
+    const m = SM && SM.Stream ? String(SM.Stream.mode) : '';
+    if (m === 'QR' || m === 'PAIRING') return 'not-linked';
+  } catch (e) {}
   let reason;
   try { reason = req('WAWebLogoutReasonConstants').LogoutReason.UserInitiated; } catch (e) {}
   let unpair = 'skipped';
@@ -335,7 +374,7 @@ export function notifyCallFailed(): void {
 /** Defensive: keep the call layer hidden. The layer is only the popout host + call
  *  automation engine — never a visible surface. Used when the popout window closes. */
 export function hideCallLayer(): void {
-  if (!callView) return;
+  if (!callView || reparented) return;   // linking window owns visibility while reparented
   callView.setVisible(false);
 }
 
@@ -397,7 +436,11 @@ export function createCallView(win: BrowserWindow): WebContentsView {
   // PipeWire placeholder through to the Wayland portal. Covers the call popout too: it
   // inherits this session. Cancel → deny (getDisplayMedia rejects; the call keeps running).
   callSession.setDisplayMediaRequestHandler(async (_request, callback) => {
-    const source = await pickDisplaySource(win);
+    // Parent the picker to the visible call surface: during a call that's the popout, and
+    // the main window may be hidden to tray — a modal on a hidden parent is unreachable
+    // and would leave getDisplayMedia hanging on an invisible dialog.
+    const parent = activePopout && !activePopout.isDestroyed() ? activePopout : win;
+    const source = await pickDisplaySource(parent);
     callback(source ? { video: source } : { video: undefined });
   }, { useSystemPicker: true });
 
@@ -468,6 +511,7 @@ export function createCallView(win: BrowserWindow): WebContentsView {
   installCallShims(wc);
 
   wc.on('did-create-window', (popout) => {
+    activePopout = popout;
     // Give the call popout the same shims (mic-permission + AB-prop force) so the call
     // button/engine work there too.
     installCallShims(popout.webContents);
@@ -492,17 +536,22 @@ export function createCallView(win: BrowserWindow): WebContentsView {
     const READ_ACTIVE = `(() => { try { return !!window.require('WAWebCallCollection').activeCall; } catch (e) { return false; } })()`;
     let sawActive = false;
     const openedAt = Date.now();
-    const poll = setInterval(async () => {
+    const tick = async () => {
       if (popout.isDestroyed()) { clearInterval(poll); return; }
       const active = await wc.executeJavaScript(READ_ACTIVE).catch(() => sawActive);
       if (active) { sawActive = true; return; }
       if (sawActive) { clearInterval(poll); popout.close(); }                          // call ended → close
       else if (Date.now() - openedAt > 25000) { clearInterval(poll); popout.close(); } // never connected → blank cleanup
-    }, 1000);
+    };
+    const poll = setInterval(tick, 1000);
+    // Seed sawActive NOW: the popout only opens because activeCall was set, so a sub-second
+    // decline that clears activeCall before the first 1s tick would otherwise never latch
+    // sawActive and the dead popout would linger the full 25s blank-timeout.
+    tick();
     // Whenever the popout goes away, stop polling and make sure the overlay isn't left showing.
     // Ending the call when the popout is closed/moved is handled by the opener-side guard
     // (CALL_OBSERVER_JS): it ends any call that leaves the popout window.
-    popout.on('closed', () => { clearInterval(poll); hideCallLayer(); });
+    popout.on('closed', () => { clearInterval(poll); if (activePopout === popout) activePopout = null; hideCallLayer(); });
   });
 
   // Esc returns to the chat. Fires only while the call layer has focus (which it does
