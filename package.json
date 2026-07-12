@@ -12,7 +12,9 @@
     "make": "electron-forge make",
     "make:linux": "rm -rf out && electron-forge make --platform=linux --arch=x64",
     "publish": "electron-forge publish",
-    "lint": "eslint --ext .ts,.tsx ."
+    "lint": "eslint --ext .ts,.tsx .",
+    "postinstall": "node packaging/rpm/patch-spec.mjs",
+    "make:linux:portable": "docker build -t whatswine-builder packaging/builder && docker run --rm -v \"$PWD:/src\" whatswine-builder bash /src/packaging/builder/build.sh"
   },
   "keywords": [],
   "author": {
@@ -20,6 +22,9 @@
     "email": "akverma4aman@gmail.com"
   },
   "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
   "devDependencies": {
     "@electron-forge/cli": "^7.11.2",
     "@electron-forge/maker-deb": "^7.11.2",
@@ -30,6 +35,7 @@
     "@electron-forge/plugin-fuses": "^7.11.2",
     "@electron-forge/plugin-vite": "^7.11.2",
     "@electron/fuses": "^1.8.0",
+    "@reforged/maker-appimage": "^5.2.0",
     "@types/better-sqlite3": "^7.6.13",
     "@types/electron-squirrel-startup": "^1.0.2",
     "@typescript-eslint/eslint-plugin": "^5.62.0",

@@ -1,11 +1,20 @@
 import type { ForgeConfig } from '@electron-forge/shared-types';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { execSync } from 'node:child_process';
 import { MakerDeb } from '@electron-forge/maker-deb';
+import { MakerRpm } from '@electron-forge/maker-rpm';
+import { MakerZIP } from '@electron-forge/maker-zip';
+import { MakerAppImage } from '@reforged/maker-appimage';
 import { VitePlugin } from '@electron-forge/plugin-vite';
 import { AutoUnpackNativesPlugin } from '@electron-forge/plugin-auto-unpack-natives';
 import { FusesPlugin } from '@electron-forge/plugin-fuses';
 import { FuseV1Options, FuseVersion } from '@electron/fuses';
+
+const hasBin = (bin: string): boolean => {
+  try { execSync(`command -v ${bin}`, { stdio: 'ignore', shell: '/bin/sh' }); return true; }
+  catch { return false; }
+};
 
 const config: ForgeConfig = {
   packagerConfig: {
@@ -39,7 +48,29 @@ const config: ForgeConfig = {
     // to the running (tray-hidden) instance instead of doing nothing.
     // `bin` must match the packaged binary, which comes from productName (WhatsWine),
     // not the package `name` the deb maker defaults to (whatswine).
-    new MakerDeb({ options: { bin: 'WhatsWine', icon: 'assets/icon.png', desktopTemplate: path.resolve(__dirname, 'assets/whatswine.desktop.ejs') } }),
+    // Every maker is gated on its external tool: forge aborts the WHOLE make when any
+    // resolved maker can't run, and a host missing one tool should still get the rest.
+    ...(hasBin('dpkg')
+      ? [new MakerDeb({ options: { bin: 'WhatsWine', icon: 'assets/icon.png', desktopTemplate: path.resolve(__dirname, 'assets/whatswine.desktop.ejs') } })]
+      : (console.warn('[forge] dpkg not found — skipping deb maker'), [])),
+    // rpm: Fedora/RHEL/openSUSE. Same bin/icon reasoning as the deb above; the rpm maker
+    // has no desktopTemplate option, so its .desktop lacks StartupWMClass (see PACKAGING.md).
+    // The rpm>=4.20 spec-template incompatibility is patched by postinstall — see
+    // packaging/rpm/patch-spec.mjs.
+    // scripts.post: container test showed the rpm ships chrome-sandbox 755 (deb's postinst
+    // sets 4755) — the %post restores the setuid sandbox. Untyped in forge, hence the cast.
+    ...(hasBin('rpmbuild')
+      ? [new MakerRpm({ options: { bin: 'WhatsWine', icon: 'assets/icon.png', scripts: { post: path.resolve(__dirname, 'packaging/rpm/post.sh') } } } as ConstructorParameters<typeof MakerRpm>[0])]
+      : (console.warn('[forge] rpmbuild not found — skipping rpm maker (apt install rpm)'), [])),
+    // zip: distro-agnostic archive fallback (also the artifact an AUR PKGBUILD can repack).
+    new MakerZIP({}),
+    // AppImage: universal single-file. No setuid chrome-sandbox inside an AppImage — the
+    // sandbox rides on unprivileged user namespaces (Ubuntu 24.04 caveat in PACKAGING.md).
+    // Gated on mksquashfs (squashfs-tools): forge aborts the WHOLE make when any maker's
+    // external binary is missing, and hosts without it should still get deb/rpm/zip.
+    ...(hasBin('mksquashfs')
+      ? [new MakerAppImage({ options: { bin: 'WhatsWine', categories: ['Network', 'InstantMessaging'], genericName: 'WhatsApp Client', icon: 'assets/icon.png' } })]
+      : (console.warn('[forge] mksquashfs not found — skipping AppImage maker (apt install squashfs-tools)'), [])),
   ],
   plugins: [
     // Keeps native modules (better-sqlite3, libsignal) out of the asar so their
