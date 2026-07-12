@@ -37,12 +37,16 @@ renders the QR → pairs → **login sticks** → syncs contacts/profile-picture
 | `startup.ts` | Connection, NativeAppState, Preferences, SystemIntegrations (native toasts/badge), WebUpdate, BrowserExtensions, SeamlessMigration | **Real** (Electron primitives) |
 | `data.ts` | Contacts/PopulatedContacts, Wam, AbProps, TcToken | **Real** (sqlite stores) / TcToken dormant |
 | `media.ts` | MediaFiles, MediaTranscoding, Pictures | MediaFiles real (fs+dialog); **MediaTranscoding stub** (no WebView2 shared-buffer); Pictures real |
-| `voip.ts` | Voip, VoipSignaling | Surface + signaling pass-through; **media engine stub** (no Linux IVoip) |
+| `voip.ts` | Voip, VoipSignaling | Surface + signaling pass-through; hybrid media engine stub (no Linux IVoip) — **1:1 calls hand off to the call layer** (`callView.ts`, working); group calls unsupported (toast) |
 | `shell.ts` | AppActivation, Sharesheet, ScalingControl, RateApp, LinksPreview | Real (LinksPreview = fetch+OG parse) |
 | `core.ts` | DebugFeatures, TouchpadFix, `__legacy__` | thin/no-op |
 
 ## Known hard edges (no clean Linux equivalent — documented, not oversights)
-- **VoIP media engine** (`IVoip` relay + HBH-SRTP) — proprietary; calls' UI works, media doesn't connect.
+- **VoIP media engine** (`IVoip` relay + HBH-SRTP) — proprietary; the hybrid view's own call
+  path can't connect media. **Worked around, not fixed**: 1:1 calling is fully delivered by
+  the call layer (`callView.ts` — a hidden second linked device running plain web.whatsapp.com,
+  whose WASM voip stack carries the media; calls live in WhatsApp's own popout window; see
+  `NOTES.md`). Group calling remains unsupported (no dialable hand-off — native toast).
 - **MediaTranscoding** — WebView2 `PostSharedBuffer` frame API; the bundle has a WASM fallback.
 - **Media save byte-channel**, **WNS push**, **DPAPI machine-binding** — substituted or stubbed (`safeStorage`, OS file ACLs).
 
@@ -57,4 +61,4 @@ npm run lint
 Linux dev note: Electron's chrome-sandbox needs `chrome-sandbox` to be `root:root 4755`, else export `ELECTRON_DISABLE_SANDBOX=1` (dev only — keep `sandbox:true` in code).
 
 ## Next (post-login polish, evidence-driven via `WA_BRIDGE_DEBUG`)
-Wire native media download (`session.will-download` → resolve `MediaFilesBridge` pending), real notification reply actions (libnotify), and decide VoIP strategy (bundle WebRTC vs. a native engine).
+Wire native media download (`session.will-download` → resolve `MediaFilesBridge` pending) and real notification reply actions (libnotify). VoIP strategy is decided and shipped: the call-layer linked device (bundle WebRTC/WASM) carries 1:1 calls; remaining calling work is tracked in `CALL_REVIEW_TODO.md` (A1 watchdog, A3 focus-steal).

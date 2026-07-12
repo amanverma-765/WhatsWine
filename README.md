@@ -24,6 +24,11 @@ native SQLite persistence. 29 native host-object bridges are registered.
 - Login secrets stored through Electron `safeStorage` (a DPAPI substitute).
 - System tray with show/hide and unread badge driven off the tab title.
 - Native desktop notifications, notification tones, and an incoming-call ringtone.
+- **1:1 voice & video calling** — real WASM-backed WhatsApp calling via a hidden second
+  linked device (the call layer), with calls living in WhatsApp's own popout window:
+  outgoing hand-off from the chat's call button, incoming auto-popout, screen share with
+  an in-app source picker and a draggable self-preview, one-time "Enable calling" onboarding
+  with a live status banner, and automatic unlink on logout.
 - Single-instance (second launch focuses the existing window) and close-to-tray.
 - Signal-protocol key verification backed by `@signalapp/libsignal-client` (XEdDSA).
 - Packaged as a `.deb` with bundled native modules and a proper desktop entry.
@@ -32,8 +37,11 @@ native SQLite persistence. 29 native host-object bridges are registered.
 
 These have no clean Linux equivalent and are documented, not accidental:
 
-- **VoIP media** — call UI and signaling pass through, but the proprietary `IVoip` relay +
-  HBH-SRTP media engine doesn't connect.
+- **Group calling** — the hybrid bridge has no dialable group hand-off; a group call
+  attempt shows a native "Call failed" toast. (1:1 calling works — see Features.)
+- **Native `IVoip` media engine** — proprietary (relay + HBH-SRTP); the hybrid view's own
+  call path stays stubbed. Irrelevant in practice: calls are delivered through the plain-web
+  call layer's WASM voip stack instead.
 - **Media transcoding** — relies on the WebView2 shared-buffer frame API (the bundle has a WASM fallback).
 - **WNS push** and **DPAPI machine-binding** — substituted with `safeStorage` / OS file ACLs.
 

@@ -65,6 +65,9 @@ real-vs-stub table.
 
 VoIP media engine, MediaTranscoding (WebView2 shared-buffer frame API), media save byte-channel, and
 WNS push have no clean Linux equivalent — substituted or stubbed. See `PORTING.md` "Known hard edges".
+Note: 1:1 calling nevertheless WORKS — delivered by the call layer (`src/callView.ts`, a hidden second
+linked device on `persist:wa-call` whose WASM voip stack carries the media, popped out into WhatsApp's
+own call window). Group calling is unsupported (toast). Open calling issues: `CALL_REVIEW_TODO.md`.
 
 ## Conventions
 
