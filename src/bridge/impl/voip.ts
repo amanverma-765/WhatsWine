@@ -80,7 +80,8 @@ function showIncomingCallToast(ctx: BridgeContext, peerJid: string): void {
   // raw form throws inside openChatInHybrid and the click silently does nothing.
   n.on('click', () => { showMainWindow(); openChatInHybrid(peerJid.replace(/:\d+(?=@)/, '')); });
   n.show();
-  showMainWindow();
+  // Deliberately no showMainWindow() here: the window raises only on toast CLICK, so a
+  // stale offer replayed at app start can't steal focus for a call that already ended.
 }
 
 // ponytail self-check (WA_VOIP_SELFCHECK=1): jid parse + dedup, no framework.

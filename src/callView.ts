@@ -238,6 +238,10 @@ const startCallJs = (peerJid: string, useVideo: boolean): string => `(() => new 
 // if a name drifts the popout just doesn't open — it never falls back to the web UI.
 // Upgrade path: subscribe to WAWebCallCollection's change event instead of polling once a
 // stable event hook is available.
+// Console marker the observer emits when a call is stuck outside the popout; the main
+// process watches for it and shows the native toast (the only non-web feedback path).
+const WATCHDOG_MARK = '[wwine-call-watchdog]';
+
 const CALL_OBSERVER_JS = `(() => {
   if (window.__wwineCallObserver) return; window.__wwineCallObserver = true;
   ${MOD_JS}
@@ -253,21 +257,26 @@ const CALL_OBSERVER_JS = `(() => {
   // (a boolean cleared on 'opening' re-armed the moment opening flipped false before
   // inPopout flipped true → double openVoipUiPopoutWindow), yet still expire so a silent
   // no-op open gets retried (~5s later) instead of latching forever.
-  let wasInPopout = false, popping = 0;
+  let wasInPopout = false, popping = 0, stuck = 0, warned = false;
   setInterval(() => {
     const C = mod('WAWebCallCollection'), U = mod('WAWebVoipUiManager'), P = mod('WAWebVoipPopoutWindowState');
     if (!C || !P || !P.getIsCallActiveInPopoutWindow) return;
-    if (!C.activeCall) { wasInPopout = false; popping = 0; return; }   // no call → reset latches
+    if (!C.activeCall) { wasInPopout = false; popping = 0; stuck = 0; warned = false; return; }   // no call → reset latches
     const inPopout = !!P.getIsCallActiveInPopoutWindow();
     const opening  = !!(P.getIsPopoutWindowOpening && P.getIsPopoutWindowOpening());
-    if (inPopout) { wasInPopout = true; popping = 0; return; }         // where we want it
-    if (opening)  return;                                              // popout creating — wait
+    if (inPopout) { wasInPopout = true; popping = 0; stuck = 0; warned = false; return; }         // where we want it
+    if (opening)  { stuck = 0; return; }                               // popout creating — wait
     if (wasInPopout) {   // call was popped out and has now left the popout → end it
       wasInPopout = false;
       console.warn('[wwine-call] call left popout window → ending call');
       endCall();
       return;
     }
+    // A1 watchdog: a call has been active but outside the popout for ~4s — the popout
+    // module is missing/renamed or openVoipUiPopoutWindow silently no-ops (covers
+    // incoming calls too, which never go through placeCall). One marker per call; the
+    // main process turns it into the native toast.
+    if (++stuck >= 8 && !warned) { warned = true; console.warn('${WATCHDOG_MARK} active call not in popout after ~4s'); }
     if (popping > 0 && --popping) return;                              // requested recently — wait
     if (!U || !U.openVoipUiPopoutWindow) return;                       // can't pop
     popping = 10;
@@ -505,6 +514,13 @@ export function createCallView(win: BrowserWindow): WebContentsView {
   });
 
   installCallShims(wc);
+
+  // A1 watchdog feedback: the observer marks a call stuck outside the popout (module
+  // drift / silent no-op — covers incoming calls too); surface the native toast, the
+  // only non-web feedback path. At most once per call (latched in the observer).
+  wc.on('console-message', (_e, _level, message) => {
+    if (message.includes(WATCHDOG_MARK)) notifyCallFailed();
+  });
 
   wc.on('did-create-window', (popout) => {
     activePopout = popout;

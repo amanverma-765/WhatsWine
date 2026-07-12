@@ -61,4 +61,4 @@ npm run lint
 Linux dev note: Electron's chrome-sandbox needs `chrome-sandbox` to be `root:root 4755`, else export `ELECTRON_DISABLE_SANDBOX=1` (dev only — keep `sandbox:true` in code).
 
 ## Next (post-login polish, evidence-driven via `WA_BRIDGE_DEBUG`)
-Wire native media download (`session.will-download` → resolve `MediaFilesBridge` pending) and real notification reply actions (libnotify). VoIP strategy is decided and shipped: the call-layer linked device (bundle WebRTC/WASM) carries 1:1 calls; remaining calling work is tracked in `CALL_REVIEW_TODO.md` (A1 watchdog, A3 focus-steal).
+Wire native media download (`session.will-download` → resolve `MediaFilesBridge` pending) and real notification reply actions (libnotify). VoIP strategy is decided and shipped: the call-layer linked device (bundle WebRTC/WASM) carries 1:1 calls; residual hardening notes live in `CALL_REVIEW_TODO.md`.

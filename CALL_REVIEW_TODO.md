@@ -10,26 +10,13 @@ Status legend: **DECISION** = needs a product/behavior call before fixing ·
 
 ---
 
-## A. Needs a decision (3)
+## A. Needs a decision (1)
 
-### A1. Silent unanswerable call when WA modules drift  — *highest impact*
-- **Where:** `src/callView.ts` `CALL_OBSERVER_JS` (the 500ms observer); `placeCall`.
-- **Problem:** The popout is opened only by `WAWebVoipUiManager.openVoipUiPopoutWindow()`.
-  If that module name drifts (WA bundle update) or never loads, an **active call**
-  (outgoing or live incoming) stays alive in the hidden call layer with **no popout and
-  no feedback** — the peer may hear ringing, the user sees nothing. `startCallJs` now
-  resolves on `!!mod('WAWebVoipUiManager')`, which catches the *missing-module* case for
-  outgoing calls, but **not** the case where the module exists yet `openVoipUiPopoutWindow`
-  silently no-ops, and **not** incoming calls at all (they never go through `placeCall`).
-- **Fix (≈5 lines):** add a watchdog inside the observer — if `activeCall` is present but
-  not in the popout (and not `opening`) for ~4s (≈8 ticks), fire `notifyCallFailed()` once
-  and `console.warn`, then latch so it doesn't spam. Requires surfacing a callback from the
-  injected JS to the main process (e.g. set a `title`/console marker the main process polls,
-  or reuse the existing `did-create-window` / console bridge already wired under
-  `WA_CALL_DIAG`).
-- **Decision:** today's silent-degrade is the deliberate "never surface the web UI" choice;
-  a native toast is the only non-web feedback path. **Recommend: add the watchdog** — a
-  silent unanswerable call is the worst failure mode.
+### ~~A1. Silent unanswerable call when WA modules drift~~ — DONE (watchdog added)
+`CALL_OBSERVER_JS` now counts ticks where a call is active but not in (or opening) the
+popout; after ~4s (8 ticks) it emits a `[wwine-call-watchdog]` console marker once per
+call, and the main process's `console-message` listener turns it into `notifyCallFailed()`.
+Covers the silent-no-op and incoming-call cases `startCallJs`'s module check missed.
 
 ### A2. Message-notification read / dismiss side-effects
 - **Where:** `src/bridge/impl/startup.ts` notification `click` handler.
@@ -45,16 +32,9 @@ Status legend: **DECISION** = needs a product/behavior call before fixing ·
 - **Decision:** **Recommend (a)** — keep current; only revisit if a notification is observed
   lingering on another device after the chat is opened here.
 
-### A3. Window auto-raises on every incoming-call toast (incl. stale)
-- **Where:** `src/bridge/impl/voip.ts` `showIncomingCallToast` — the bare `showMainWindow()`
-  after `n.show()` (separate from the one in the click handler).
-- **Problem:** The main window jumps to the foreground whenever an incoming-call toast is
-  shown — including a **stale** missed-call offer replayed when the app opens late. May be
-  intentional (bring app forward when called) or unwanted (window steals focus for a call
-  that already ended).
-- **Fix:** delete the bare `showMainWindow()` so the window only raises on toast **click**
-  (−1 line). Keep it if foreground-on-incoming is desired.
-- **Decision:** **Recommend: raise only on click** (delete the bare call).
+### ~~A3. Window auto-raises on every incoming-call toast (incl. stale)~~ — DONE
+The bare `showMainWindow()` after `n.show()` is removed; the window raises only on toast
+click, so a stale offer replayed at app start can't steal focus.
 
 ---
 
