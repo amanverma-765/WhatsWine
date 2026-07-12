@@ -75,7 +75,10 @@ function showIncomingCallToast(ctx: BridgeContext, peerJid: string): void {
   // call-layer device rings on its own). A STALE one (app opened after the call ended)
   // has no active call to pop out, so clicking just opens that contact's chat in the
   // PRIMARY hybrid window — never the plain-web call layer.
-  n.on('click', () => { showMainWindow(); openChatInHybrid(peerJid); });
+  // Strip any device suffix (number:5@s.whatsapp.net → number@s.whatsapp.net): signaling
+  // offers carry device jids, but WAWebWidFactory.createWid only accepts a chat wid — the
+  // raw form throws inside openChatInHybrid and the click silently does nothing.
+  n.on('click', () => { showMainWindow(); openChatInHybrid(peerJid.replace(/:\d+(?=@)/, '')); });
   n.show();
   showMainWindow();
 }
