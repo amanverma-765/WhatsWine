@@ -22,10 +22,19 @@ interface SqliteResult {
 // (number/string/Buffer/null/bigint) binds directly.
 const bindable = (p: unknown): unknown => (typeof p === 'boolean' ? (p ? 1 : 0) : p);
 
+// The bundle only ever drives its OWN store here. ATTACH/DETACH would let page SQL open a
+// foreign SQLite database at any host path — reading other apps' data or creating/overwriting
+// files outside userData — so reject them. Leading SQL comments are stripped before the keyword
+// test; better-sqlite3 compiles one statement per prepare, so the guarded verb must be first.
+const ATTACH_STMT = /^\s*(?:\/\*[\s\S]*?\*\/\s*|--[^\n]*(?:\n|$)\s*)*(?:attach|detach)\b/i;
+
 function run(db: import('better-sqlite3').Database, cmds: unknown[][]): SqliteResult[] {
   return cmds.map((cmd): SqliteResult => {
     const [sql, ...params] = cmd as [string, ...unknown[]];
     try {
+      if (ATTACH_STMT.test(String(sql))) {
+        return { LastInsertedRowId: 0, RowsAffected: 0, Rows: [], ColumnNames: [], Error: 'ATTACH/DETACH not permitted' };
+      }
       const stmt = db.prepare(sql);
       const args = params.map(bindable);
       if (stmt.reader) {
@@ -68,4 +77,19 @@ export const bridges: Record<string, BridgeFactory> = {
 
 function safeParse(s: string): unknown {
   try { return JSON.parse(s); } catch { return []; }
+}
+
+// ponytail self-check (WA_SQLITE_SELFCHECK=1): ATTACH/DETACH guard, no framework.
+if (process.env.WA_SQLITE_SELFCHECK) {
+  const blocked = [
+    'ATTACH DATABASE \'/etc/x\' AS y',
+    '  attach database ":memory:" as z',
+    '/* c */ ATTACH DATABASE \'x\' AS y',
+    '-- note\nDETACH DATABASE y',
+    'DETACH y',
+  ];
+  const allowed = ['SELECT x FROM t', "INSERT INTO t(x) VALUES('attach me')", 'UPDATE t SET x=1'];
+  for (const s of blocked) console.assert(ATTACH_STMT.test(s), `should block: ${s}`);
+  for (const s of allowed) console.assert(!ATTACH_STMT.test(s), `should allow: ${s}`);
+  console.log('[sqlite self-check] ok');
 }
