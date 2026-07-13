@@ -76,6 +76,16 @@ export async function pickDisplaySource(
   });
 }
 
+// Serialize a value for embedding inside an inline <script>. JSON.stringify does NOT
+// escape `<`, so a source `name` (an attacker-influenceable OS window title) containing
+// `</script>` would terminate the script element and inject code — and this window runs
+// with nodeIntegration, so that is host RCE. Escaping `<` (and the JS line separators)
+// makes the embedded literal inert regardless of which field is tainted.
+function htmlSafeJson(value: unknown): string {
+  return JSON.stringify(value).replace(/[<\u2028\u2029]/g, (c) =>
+    '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+}
+
 // Self-contained picker page as a data: URL. Renders the thumbnails in a grid and sends the
 // chosen source id (or null on cancel) back over IPC. JSON is embedded, not interpolated into
 // markup, so window titles can't break out of the HTML.
@@ -108,8 +118,8 @@ function pickerHtml(
   <div class="bar"><button id="cancel">Cancel</button><button id="share" disabled>Share</button></div>
   <script>
   const { ipcRenderer } = require('electron');
-  const CH = ${JSON.stringify(channel)};
-  const items = ${JSON.stringify(items)};
+  const CH = ${htmlSafeJson(channel)};
+  const items = ${htmlSafeJson(items)};
   let selected = null;
   const grid = document.getElementById('grid');
   const shareBtn = document.getElementById('share');
