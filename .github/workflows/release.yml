@@ -1,0 +1,119 @@
+# On-demand release pipeline: builds ALL Linux artifacts and publishes them on the
+# GitHub Release tagged v<package.json version>. Runs ONLY when asked:
+#   - Actions tab → release → "Run workflow"  (or: gh workflow run release)
+#   - or pushing a version tag:  git tag v1.0.1 && git push origin v1.0.1
+# Re-running the same version refreshes that release's assets; bumping the version in
+# package.json cuts a new release. Build recipes mirror what was container-verified
+# locally (see PACKAGING.md):
+#   - deb/rpm/zip/AppImage via the ubuntu:22.04 portable builder (glibc 2.35 floor)
+#   - snap via Canonical's snapcraft container in destructive mode
+#   - flatpak bundle via flatpak-github-actions (freedesktop 24.08)
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+concurrency:
+  group: release
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      # The docker builder pins the glibc floor at 2.35 regardless of runner image drift.
+      - name: Build deb/rpm/zip/AppImage (portable)
+        run: npm run make:linux:portable
+      - uses: actions/upload-artifact@v4
+        with:
+          name: packages
+          path: |
+            out/make-portable/deb/x64/*.deb
+            out/make-portable/rpm/x64/*.rpm
+            out/make-portable/zip/linux/x64/*.zip
+            out/make-portable/AppImage/x64/*.AppImage
+          if-no-files-found: error
+
+  snap:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: dist
+      - name: Stage snap workdir
+        run: |
+          mkdir -p snapwork/extras
+          cp packaging/snap/snapcraft.yaml snapwork/
+          cp packaging/snap/extras/whatswine.desktop snapwork/extras/
+          cp assets/icon.png snapwork/extras/
+          cp dist/zip/linux/x64/WhatsWine-linux-x64-*.zip snapwork/
+      - name: snapcraft pack (destructive, containerized)
+        run: |
+          docker run --rm -v "$PWD/snapwork:/project" -w /project --entrypoint "" \
+            ghcr.io/canonical/snapcraft:8_core24 \
+            snapcraft pack --destructive-mode --verbosity=brief
+          ls snapwork/*.snap
+      - uses: actions/upload-artifact@v4
+        with:
+          name: snap
+          path: snapwork/*.snap
+          if-no-files-found: error
+
+  flatpak:
+    runs-on: ubuntu-latest
+    needs: build
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-24.08
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: packages
+          path: out/make-portable
+      - name: Build flatpak bundle
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          manifest-path: packaging/flatpak/com.ark.whatswine.yml
+          bundle: whatswine-${{ needs.build.outputs.version }}.flatpak
+          cache: false
+          upload-artifact: false
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flatpak
+          path: whatswine-*.flatpak
+          if-no-files-found: error
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build, snap, flatpak]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Collect assets + checksums
+        run: |
+          mkdir -p assets
+          find dist -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.zip' -o -name '*.AppImage' -o -name '*.snap' -o -name '*.flatpak' \) -exec cp {} assets/ \;
+          cd assets && sha256sum * > SHA256SUMS && ls -la
+      - name: Create/refresh release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.build.outputs.version }}
+          name: WhatsWine v${{ needs.build.outputs.version }}
+          generate_release_notes: true
+          make_latest: true
+          files: assets/*

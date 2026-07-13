@@ -46,8 +46,11 @@ needs nothing extra.
    (`HYBRID_SMOKE=1` on the packaged binary, or install the deb in a container and launch
    — see the docker test scripts pattern: install → `xvfb-run … --no-sandbox` → grep
    "registered 29 host-object bridges" / "SMOKE PASS").
-3. Tag + GitHub Release; attach deb/rpm/zip/AppImage. Generate checksums:
-   `find out/make -type f -exec sha256sum {} + > SHA256SUMS` and attach it.
+3. Cut the release from CI (on-demand only — nothing runs automatically):
+   `gh workflow run release` (or Actions tab → release → Run workflow, or push a
+   `v<version>` tag). The workflow (`.github/workflows/release.yml`) builds
+   deb/rpm/zip/AppImage (portable builder), the snap, and a `.flatpak` bundle, then
+   publishes them all + `SHA256SUMS` on the `v<version>` GitHub Release.
 4. AUR: put the release-deb sha256 into `PKGBUILD`, `makepkg --printsrcinfo > .SRCINFO`,
    push to `ssh://aur@aur.archlinux.org/whatswine-bin.git`.
 5. Flathub / Snap Store: see caveats below before submitting.
