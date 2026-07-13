@@ -14,7 +14,8 @@
     "publish": "electron-forge publish",
     "lint": "eslint --ext .ts,.tsx .",
     "postinstall": "node packaging/rpm/patch-spec.mjs",
-    "make:linux:portable": "docker build -t whatswine-builder packaging/builder && docker run --rm -v \"$PWD:/src\" whatswine-builder bash /src/packaging/builder/build.sh"
+    "make:linux:portable": "docker build -t whatswine-builder packaging/builder && docker run --rm -v \"$PWD:/src\" whatswine-builder bash /src/packaging/builder/build.sh",
+    "release": "gh workflow run release && sleep 5 && gh run watch $(gh run list --workflow=release --limit 1 --json databaseId --jq '.[0].databaseId')"
   },
   "keywords": [],
   "author": {
