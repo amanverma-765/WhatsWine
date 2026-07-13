@@ -42,6 +42,25 @@ const config: ForgeConfig = {
         );
       }
     },
+    // AppImage entrypoint (MakerAppImage bin points here; inert in deb/rpm/zip). Written
+    // at the PACKAGE ROOT next to the WhatsWine binary — packageAfterCopy's buildPath
+    // would bury it inside app.asar. The payload's chrome-sandbox can never be setuid on
+    // an AppImage's nosuid mount, so on kernels that also block unprivileged user
+    // namespaces (Ubuntu 24.04+ AppArmor default) Chromium has NO usable sandbox and
+    // FATALs at startup. Probe userns and fall back to --no-sandbox only when blocked.
+    async postPackage(_config, pkg) {
+      for (const p of pkg.outputPaths ?? []) {
+        await fs.writeFile(path.join(p, 'whatswine-appimage.sh'), `#!/bin/sh
+d="$(dirname "$(readlink -f "$0")")"
+if unshare --user --map-root-user true 2>/dev/null; then
+  exec "$d/WhatsWine" "$@"
+else
+  echo "[whatswine] unprivileged user namespaces are blocked on this system - running with --no-sandbox (install the .deb/.rpm for a fully sandboxed setup)" >&2
+  exec "$d/WhatsWine" --no-sandbox "$@"
+fi
+`, { mode: 0o755 });
+      }
+    },
   },
   makers: [
     // desktopTemplate adds StartupWMClass so GNOME/Wayland ties an app-list click
@@ -69,7 +88,7 @@ const config: ForgeConfig = {
     // Gated on mksquashfs (squashfs-tools): forge aborts the WHOLE make when any maker's
     // external binary is missing, and hosts without it should still get deb/rpm/zip.
     ...(hasBin('mksquashfs')
-      ? [new MakerAppImage({ options: { bin: 'WhatsWine', categories: ['Network', 'InstantMessaging'], genericName: 'WhatsApp Client', icon: 'assets/icon.png' } })]
+      ? [new MakerAppImage({ options: { bin: 'whatswine-appimage.sh', categories: ['Network', 'InstantMessaging'], genericName: 'WhatsApp Client', icon: 'assets/icon.png' } })]
       : (console.warn('[forge] mksquashfs not found — skipping AppImage maker (apt install squashfs-tools)'), [])),
   ],
   plugins: [

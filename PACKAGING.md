@@ -47,10 +47,11 @@ needs nothing extra.
    — see the docker test scripts pattern: install → `xvfb-run … --no-sandbox` → grep
    "registered 29 host-object bridges" / "SMOKE PASS").
 3. Cut the release from CI (on-demand only — nothing runs automatically):
-   `gh workflow run release` (or Actions tab → release → Run workflow, or push a
-   `v<version>` tag). The workflow (`.github/workflows/release.yml`) builds
-   deb/rpm/zip/AppImage (portable builder), the snap, and a `.flatpak` bundle, then
-   publishes them all + `SHA256SUMS` on the `v<version>` GitHub Release.
+   `npm run release` (dispatches and live-watches the workflow; equivalents: Actions tab
+   → release → Run workflow, `gh workflow run release`, or pushing a `v<version>` tag).
+   The workflow (`.github/workflows/release.yml`) builds deb/rpm/zip/AppImage (portable
+   builder), the snap, and a `.flatpak` bundle, then publishes them all + `SHA256SUMS`
+   on the `v<version>` GitHub Release. Re-running a version refreshes its assets.
 4. AUR: put the release-deb sha256 into `PKGBUILD`, `makepkg --printsrcinfo > .SRCINFO`,
    push to `ssh://aur@aur.archlinux.org/whatswine-bin.git`.
 5. Flathub / Snap Store: see caveats below before submitting.
@@ -62,10 +63,16 @@ Chromium's setuid sandbox (`chrome-sandbox` root:root 4755) is only guaranteed b
 deb maker ships its own; a container test caught the rpm installing 755) and the **AUR**
 `package()` chmod. Formats that can't setuid fall back to unprivileged user namespaces:
 
-- **AppImage / zip**: works out of the box on most modern kernels. Ubuntu 23.10+
-  restricts unprivileged userns via AppArmor — users there need
-  `sysctl kernel.apparmor_restrict_unprivileged_userns=0`, an AppArmor profile, or the
-  deb instead. Don't ship `--no-sandbox` as a default for these.
+- **AppImage**: its entrypoint is `whatswine-appimage.sh` (written at package root by the
+  `postPackage` hook — NOT via `packageAfterCopy`, whose buildPath gets packed into
+  app.asar). The AppImage mount is nosuid, so the setuid sandbox is structurally
+  impossible; the launcher probes unprivileged userns (`unshare --user`) and only when
+  it's blocked (Ubuntu 23.10+ AppArmor default, `kernel.apparmor_restrict_unprivileged_userns=1`)
+  falls back to `--no-sandbox` with a stderr notice pointing at the deb/rpm. Verified on
+  a userns-blocked host: without the launcher Chromium FATALs at startup ("SUID sandbox
+  helper binary was found, but is not configured correctly").
+- **zip**: same physics, no launcher — on a userns-blocked kernel run the binary with
+  `--no-sandbox`, set the sysctl, or `chmod 4755` the extracted `chrome-sandbox` as root.
 - **Flatpak**: no setuid inside the sandbox; the manifest wraps the binary with
   `zypak-wrapper` (from `org.electronjs.Electron2.BaseApp`), the standard Electron answer.
 - **Snap**: strict confinement + the `browser-support` plug provides the sandbox story;
