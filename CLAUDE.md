@@ -21,8 +21,13 @@ npm run dev                                 # same, ELECTRON_DISABLE_SANDBOX=1
 WA_BRIDGE_DEBUG=1 npm start                 # trace every bridge call + console + websockets
 HYBRID_SMOKE=1 ELECTRON_DISABLE_SANDBOX=1 npm start   # headless seam self-check (SQL round-trip, PASS/FAIL line)
 npm run lint                                # eslint .ts/.tsx
-npm run make:linux                          # clean .deb build (rm -rf out && forge make)
+npm run make:linux                          # host build: deb+rpm+zip+AppImage (makers gated on dpkg/rpmbuild/mksquashfs)
+npm run make:linux:portable                 # RELEASE build in an ubuntu:22.04 docker builder (glibc 2.35 floor) → out/make-portable/
+npm run release                             # dispatch + watch the on-demand GitHub release workflow (needs gh auth)
 ```
+
+Packaging (all channels container-verified), CI release flow, and the glibc/native-module
+portability story live in `PACKAGING.md`. Never publish host builds — portable only.
 
 There is no test framework. `HYBRID_SMOKE=1` is the end-to-end check: it drives a SQL command
 through the real bridge (preload Proxy → IPC → registry → better-sqlite3) and prints PASS/FAIL.

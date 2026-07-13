@@ -31,7 +31,9 @@ native SQLite persistence. 29 native host-object bridges are registered.
   with a live status banner, and automatic unlink on logout.
 - Single-instance (second launch focuses the existing window) and close-to-tray.
 - Signal-protocol key verification backed by `@signalapp/libsignal-client` (XEdDSA).
-- Packaged as a `.deb` with bundled native modules and a proper desktop entry.
+- Packaged for every major channel — deb, rpm, AppImage, zip, snap, flatpak — all
+  container-verified end to end (install → boot → live bridge round-trip). See
+  [`PACKAGING.md`](./PACKAGING.md).
 
 ### Not working / stubbed
 
@@ -49,11 +51,18 @@ See [`PORTING.md`](./PORTING.md) for the full per-bridge real-vs-stub breakdown.
 
 ## Install
 
-Download a release `.deb`, or build one yourself (below):
+Grab your format from the [Releases page](https://github.com/amanverma-765/WhatsWine/releases)
+(all built by CI from the glibc-2.35 portable builder — runs on Ubuntu 22.04+/Debian 12+/Fedora 36+):
 
 ```bash
-sudo dpkg -i whatswine_*.deb
+sudo apt install ./whatswine_*_amd64.deb        # Debian / Ubuntu / Mint / Pop!_OS
+sudo dnf install ./whatswine-*.x86_64.rpm       # Fedora / RHEL / openSUSE
+chmod +x WhatsWine-*.AppImage && ./WhatsWine-*.AppImage   # any distro
+sudo snap install --dangerous whatswine_*.snap  # snap (sideload)
+flatpak install ./whatswine-*.flatpak           # flatpak (bundle)
 ```
+
+Arch users: an AUR `whatswine-bin` PKGBUILD lives in [`packaging/aur/`](./packaging/aur/).
 
 ## Build from source
 
@@ -61,8 +70,15 @@ Requires Node 22 (`.nvmrc`) and the usual native-build toolchain (`build-essenti
 
 ```bash
 npm install
-npm run make:linux        # clean .deb build -> out/make/deb/x64/
+npm run make:linux            # dev build on the host -> out/make/ (deb/rpm/zip/AppImage)
+npm run make:linux:portable   # release build in an ubuntu:22.04 docker builder -> out/make-portable/
 ```
+
+**Publish only portable builds** — native modules link the build machine's glibc, and a
+rolling-release host silently raises the compatibility floor. Releases are cut from CI:
+`npm run release` dispatches the GitHub Actions workflow, which builds every format and
+attaches them (plus `SHA256SUMS`) to the `v<version>` release. Full details, including the
+snap/flatpak store-submission path and its trademark caveat: [`PACKAGING.md`](./PACKAGING.md).
 
 ## Development
 
