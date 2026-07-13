@@ -135,7 +135,13 @@ const createWindow = () => {
   // WhatsApp needs notifications (native toasts) and clipboard write access.
   // Media (mic/camera) is not needed for the hybrid window — calling goes through
   // the separate call window partition.
-  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback) => {
+  session.defaultSession.setPermissionRequestHandler((_wc, permission, callback, details) => {
+    // Origin-gate to WA (like the check handler below): only web.whatsapp.com frames get
+    // these grants, so a cross-origin iframe the remote page embeds can't request mic/camera.
+    // `media` is kept because the hybrid window records voice messages (getUserMedia audio).
+    let origin = '';
+    try { origin = new URL(details.requestingUrl).origin; } catch { /* opaque/blank origin */ }
+    if (origin !== WA_HOST_ORIGIN) return callback(false);
     callback(
       permission === 'notifications' ||
       permission === 'media' ||

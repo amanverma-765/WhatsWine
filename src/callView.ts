@@ -174,7 +174,7 @@ function installCallShims(target: Electron.WebContents): void {
 const startCallJs = (peerJid: string, useVideo: boolean): string => `(() => new Promise((resolve) => {
   const L = (m) => console.warn('[wwine-call] ' + m);
   ${MOD_JS}
-  L('start jid=${peerJid} video=${useVideo} hasRequire=' + (typeof req));
+  L('start jid=' + ${JSON.stringify(peerJid)} + ' video=${useVideo} hasRequire=' + (typeof req));
   const rx = ${useVideo ? '/video call/i' : '/voice call/i'};
   const optId = ${useVideo ? "'video-call'" : "'voice-call'"};
   let n = 0;
@@ -512,6 +512,17 @@ export function createCallView(win: BrowserWindow): WebContentsView {
     }
     return { action: 'deny' };
   });
+
+  // Pin the call view's top frame to WA, mirroring the hybrid view (main.ts). This
+  // partition auto-grants mic/camera/display-capture, so a top-frame navigation to a
+  // foreign origin would hand those grants to untrusted content. The popout opens as a
+  // separate window (setWindowOpenHandler, above); external links open in the OS browser.
+  const pinToWa = (e: Electron.Event & { url: string }) => {
+    try { if (new URL(e.url).origin !== WA_HOST_ORIGIN) e.preventDefault(); }
+    catch { e.preventDefault(); }
+  };
+  wc.on('will-navigate', pinToWa);
+  wc.on('will-redirect', pinToWa);
 
   installCallShims(wc);
 
