@@ -52,6 +52,7 @@
     "@noble/hashes": "^2.2.0",
     "@signalapp/libsignal-client": "^0.96.2",
     "better-sqlite3": "^12.11.1",
-    "electron-squirrel-startup": "^1.0.1"
+    "electron-squirrel-startup": "^1.0.1",
+    "undici": "^7.28.0"
   }
 }

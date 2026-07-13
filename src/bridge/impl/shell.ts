@@ -6,7 +6,9 @@
 import { shell, app } from 'electron';
 import path from 'node:path';
 import dns from 'node:dns/promises';
+import type { LookupAddress } from 'node:dns';
 import net from 'node:net';
+import { Agent } from 'undici';
 import type { BridgeFactory, BridgeContext } from '../types';
 import { toWeb } from '../eventtarget';
 
@@ -158,8 +160,11 @@ function linksPreviewBridge(ctx: BridgeContext): ReturnType<BridgeFactory> {
 /** True for loopback/private/link-local/metadata addresses we must never fetch. */
 function isBlockedIp(ip: string): boolean {
   if (net.isIP(ip) === 0) return false;
-  return /^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip)
-    || ip === '::1' || /^f[cd]/i.test(ip) || /^fe80/i.test(ip);
+  // Normalise IPv4-mapped IPv6 (::ffff:127.0.0.1) to its IPv4 form so the v4 rules apply.
+  const v4 = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(ip)?.[1];
+  const a = v4 ?? ip;
+  return /^(10\.|127\.|0\.|169\.254\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/.test(a)
+    || a === '::1' || /^f[cd]/i.test(a) || /^fe80/i.test(a);
 }
 
 /**
@@ -175,15 +180,28 @@ async function safeFetch(raw: string, headers: Record<string, string>): Promise<
     let u: URL;
     try { u = new URL(url); } catch { return null; }
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
-    let addr: string;
-    try { addr = (await dns.lookup(u.hostname)).address; } catch { return null; }
-    if (isBlockedIp(addr)) return null;
+
+    // Resolve EVERY address and reject if any is private/loopback/metadata, then PIN the
+    // socket to the vetted IP. Node's fetch (undici) otherwise re-resolves DNS at connect
+    // time — a separate lookup from this one — so a check-then-connect gap let an attacker
+    // controlling the hostname's DNS return a public IP here and a private one to the socket
+    // (DNS rebinding). Pinning closes that gap: the address we validated is the one connected.
+    let addrs: LookupAddress[];
+    try { addrs = await dns.lookup(u.hostname, { all: true }); } catch { return null; }
+    if (addrs.length === 0 || addrs.some((a) => isBlockedIp(a.address))) return null;
+    const pinned = addrs[0];
+    // ponytail: one short-lived Agent per hop; not explicitly closed — the response body is
+    // read after safeFetch returns, and undici reclaims idle sockets on its keep-alive timeout.
+    const dispatcher = new Agent({
+      connect: { lookup: (_h, _o, cb) => cb(null, [{ address: pinned.address, family: pinned.family }]) },
+    });
 
     const res = await fetch(url, {
       signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
       headers,
       redirect: 'manual',
-    });
+      dispatcher,
+    } as RequestInit & { dispatcher: Agent });
     if (res.status >= 300 && res.status < 400) {
       const loc = res.headers.get('location');
       if (!loc) return res;
