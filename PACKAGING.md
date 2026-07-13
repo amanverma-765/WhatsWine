@@ -87,9 +87,16 @@ residual account-ban/ToS risk that applies to all unofficial WhatsApp clients.
 ## What each skeleton still needs from you
 
 - `packaging/aur/PKGBUILD`: real GitHub `url`, release sha256, AUR repo push.
-- `packaging/flatpak/*.yml`: zip path/version per release; icon swap for Flathub;
-  `flatpak-builder` to test (`flatpak-builder --user --install --force-clean build packaging/flatpak/com.brightrays.WhatsWine.yml`).
-- `packaging/snap/snapcraft.yaml`: copy the release zip next to it, `snapcraft register
-  whatswine`, then `snapcraft && snapcraft upload`.
-- App id `com.brightrays.WhatsWine` is derived from the author domain — change once if a
-  different reverse-DNS id is preferred (it must stay stable forever on Flathub).
+- `packaging/flatpak/*.yml`: zip path/version per release; icon swap for Flathub.
+  **Container-verified** (build + full smoke): privileged ubuntu:24.04 + flatpak-builder,
+  needs a system dbus (`mkdir -p /run/dbus && dbus-daemon --system --fork`) wrapped in
+  `dbus-run-session`, `--state-dir` on the same fs as the build dir, and `--no-sandbox`
+  forwarded only because containers run as root — real desktops need none of that.
+- `packaging/snap/snapcraft.yaml`: copy the release zip + `assets/icon.png` in (header
+  comment), build with the `ghcr.io/canonical/snapcraft:8_core24` container in
+  `--destructive-mode`, `snapcraft register whatswine`, then upload. **Container-verified**
+  (pack + payload smoke). No `gnome` extension on purpose: its command-chain helpers are
+  missing in the snapcraft container images, so the GTK runtime is staged directly
+  (electron-builder's snaps use the same shape). snapd *confinement* itself can't run in
+  docker — do one `snap install --dangerous` on a real system before first publish.
+- App id `com.ark.whatswine` must stay stable forever once published on Flathub.

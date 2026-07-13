@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=WhatsWine
+GenericName=WhatsApp Client
+Comment=Unofficial WhatsApp desktop client for Linux
+Exec=whatswine.sh %U
+Icon=com.ark.whatswine
+Type=Application
+Categories=Network;InstantMessaging;
+StartupWMClass=WhatsWine

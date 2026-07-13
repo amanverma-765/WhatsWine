@@ -2,7 +2,7 @@
 <!-- AppStream metadata — required by Flathub; also improves GNOME Software / Discover
      listings for the deb/rpm if installed to /usr/share/metainfo. -->
 <component type="desktop-application">
-  <id>com.brightrays.WhatsWine</id>
+  <id>com.ark.whatswine</id>
   <name>WhatsWine</name>
   <summary>Unofficial WhatsApp desktop client</summary>
   <metadata_license>CC0-1.0</metadata_license>
@@ -20,10 +20,10 @@
       LLC or Meta Platforms, Inc.
     </p>
   </description>
-  <launchable type="desktop-id">com.brightrays.WhatsWine.desktop</launchable>
+  <launchable type="desktop-id">com.ark.whatswine.desktop</launchable>
   <url type="homepage">https://github.com/amanverma-765/WhatsWine</url>
   <url type="bugtracker">https://github.com/amanverma-765/WhatsWine/issues</url>
-  <developer id="com.brightrays"><name>amanverma-765</name></developer>
+  <developer id="com.ark"><name>amanverma-765</name></developer>
   <content_rating type="oars-1.1">
     <content_attribute id="social-chat">intense</content_attribute>
     <content_attribute id="social-audio">intense</content_attribute>

@@ -2,8 +2,8 @@
 Name=WhatsWine
 GenericName=WhatsApp Client
 Comment=Unofficial WhatsApp desktop client for Linux
-Exec=whatswine.sh %U
-Icon=com.brightrays.WhatsWine
+Exec=whatswine %U
+Icon=${SNAP}/whatswine/icon.png
 Type=Application
 Categories=Network;InstantMessaging;
 StartupWMClass=WhatsWine

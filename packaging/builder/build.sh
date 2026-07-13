@@ -11,4 +11,7 @@ npm run make:linux
 rm -rf /src/out/make-portable
 mkdir -p /src/out
 cp -a out/make /src/out/make-portable
+# The container runs as root — hand the artifacts back to the repo owner, or the host
+# can't even mkdir under out/ afterwards.
+chown -R --reference=/src/package.json /src/out
 echo "[builder] portable artifacts → out/make-portable/"

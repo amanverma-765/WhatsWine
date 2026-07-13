@@ -1,5 +1,8 @@
-# Snap skeleton for WhatsWine. Build: `snapcraft` from the repo root with this file
-# at snap/snapcraft.yaml (or `snapcraft --project-dir packaging/snap` on newer snapcraft).
+# Snap skeleton for WhatsWine. Build inputs are copied NEXT TO this file first
+# (snapcraft can't source files outside the project dir):
+#   cp out/make-portable/zip/linux/x64/WhatsWine-linux-x64-1.0.0.zip packaging/snap/
+#   cp assets/icon.png packaging/snap/extras/
+# then `snapcraft pack` from packaging/snap (or the snapcraft container in CI).
 # Publish: `snapcraft login && snapcraft upload --release=stable *.snap` (name must be
 # registered first: `snapcraft register whatswine`). See PACKAGING.md for the trademark
 # caveat before publishing to the public Snap Store.
@@ -20,7 +23,12 @@ apps:
   whatswine:
     command: whatswine/WhatsWine --no-sandbox
     desktop: whatswine/whatswine.desktop
-    extensions: [gnome]
+    # No gnome extension: its command-chain helpers aren't available in the snapcraft
+    # container images, and Electron bundles its own GTK integration — so stage the
+    # runtime libs instead (electron-builder's snaps take the same shape).
+    environment:
+      LD_LIBRARY_PATH: $SNAP/usr/lib/x86_64-linux-gnu:$SNAP/usr/lib:$LD_LIBRARY_PATH
+      TMPDIR: $XDG_RUNTIME_DIR
     plugs:
       - audio-playback
       - audio-record
@@ -45,13 +53,22 @@ parts:
     organize:
       'WhatsWine-linux-x64/*': whatswine/
     stage-packages:
+      - libgtk-3-0t64
       - libnss3
       - libnotify4
-  desktop-file:
+      - libasound2t64
+      - libxss1
+      - libxtst6
+      - libgbm1
+      - libxkbcommon0
+      - libatk-bridge2.0-0
+      - libdrm2
+      - libsecret-1-0
+  extras:
     plugin: dump
-    # The zip carries no .desktop (only the deb/rpm makers emit one); reuse the flatpak one.
-    source: ../flatpak
+    # The zip carries no .desktop or icon (only the deb/rpm makers emit them).
+    # extras/ holds the snap's own desktop file; copy assets/icon.png in before building.
+    source: extras
     organize:
-      'com.brightrays.WhatsWine.desktop': whatswine/whatswine.desktop
-    stage:
-      - whatswine/whatswine.desktop
+      whatswine.desktop: whatswine/whatswine.desktop
+      icon.png: whatswine/icon.png
