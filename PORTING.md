@@ -46,7 +46,7 @@ renders the QR → pairs → **login sticks** → syncs contacts/profile-picture
   path can't connect media. **Worked around, not fixed**: 1:1 calling is fully delivered by
   the call layer (`callView.ts` — a hidden second linked device running plain web.whatsapp.com,
   whose WASM voip stack carries the media; calls live in WhatsApp's own popout window; see
-  `NOTES.md`). Group calling remains unsupported (no dialable hand-off — native toast).
+  `CALLING.md`). Group calling remains unsupported (no dialable hand-off — native toast).
 - **MediaTranscoding** — WebView2 `PostSharedBuffer` frame API; the bundle has a WASM fallback.
 - **Media save byte-channel**, **WNS push**, **DPAPI machine-binding** — substituted or stubbed (`safeStorage`, OS file ACLs).
 

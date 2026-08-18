@@ -1,4 +1,4 @@
-# call-2window — implementation notes
+# Calling — two-layer architecture & implementation notes
 
 One **WhatsWine window with two stacked `WebContentsView` layers**, giving real WASM-backed
 WhatsApp calling alongside the native-bridge hybrid chat:
@@ -130,8 +130,29 @@ number still work (jid-based); groups / numberless peers fall back to surfacing 
 - **`web_calling_auto_popout_video` + explicit `openVoipUiPopoutWindow()`** could both try to pop out
   a video call; appears idempotent but not deeply verified.
 
-### Documentation
-- `PORTING.md` still lists VoIP under "known hard edges," which is now partly outdated for this branch.
+## Accepted by design — recorded, not bugs
+
+Flagged by the call-rework code review's removed-behavior auditor, but the **intended**
+consequences of "calls live only in WhatsApp's own popout, never the web layer":
+
+- **Group calls toast instead of connecting.** `VoipBridge.startGroupCall` has no
+  dialable hand-off and must not surface the web layer, so it calls `notifyCallFailed()`.
+  Group calling is not supported in this port (documented in `PORTING.md` "Known hard edges").
+- **No tray "Calling" fallback.** The tray entry that manually showed the web call layer
+  was removed. If the popout mechanism breaks there is intentionally no web-UI escape hatch
+  (that's the whole point of the change). The `[wwine-call-watchdog]` → `notifyCallFailed()`
+  path is the substitute feedback.
+- **Incoming relies on the call-layer device ringing.** Live incoming works because the
+  call layer is a separate linked device that rings on its own and `CALL_OBSERVER_JS` pops it
+  out. If that device is logged out/cold, incoming falls through to the stale path
+  (toast → open chat) — no web leak, just no auto-popout.
+- **Indefinite 500ms polling.** `CALL_OBSERVER_JS` polls forever in the warm-but-hidden
+  call view. Negligible CPU; matches the project's existing injected-observer pattern. The
+  upgrade path (subscribe to `WAWebCallCollection` change events) is noted in the source.
+- **`CALL_OBSERVER_JS` injected on `did-finish-load`.** Theoretically a call arriving
+  before the call view's first load would miss the observer; not reachable in practice — the
+  view loads at app startup, long before any call, and the `__wwineCallObserver` guard makes
+  re-injection idempotent.
 
 ## Verified
 | Check | Result |
