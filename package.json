@@ -1,7 +1,7 @@
 {
   "name": "whatswine",
   "productName": "WhatsWine",
-  "version": "2.2631.102",
+  "version": "1.1.0",
   "description": "Unofficial WhatsApp desktop client for Linux — an Electron shell over WhatsApp Web's Windows-hybrid bundle.",
   "main": ".vite/build/main.js",
   "private": true,
