@@ -28,7 +28,7 @@ if (started) {
 // the login socket closes 1006 (QR never loads). The web app's primary/secondary/
 // tertiary come from the served bundle; quaternary is just the Windows build tag.
 // ponytail: bump WINDOWS_BUILD if WA ever server-gates an old hybrid build.
-const WINDOWS_BUILD = '2623103';          // -> appVersion.quaternary (uint32); WhatsApp Windows 2.2623.103.0
+const WINDOWS_BUILD = '2631102';          // -> appVersion.quaternary (uint32); WhatsApp Windows 2.2631.102.0
 const HYBRID_BUILD_TYPE = 'Production';
 const OS_BUILD = '22631';
 // A real WebView2/Edge version string for the request header (not parsed as int).
