@@ -1,13 +1,14 @@
 # Snap skeleton for WhatsWine. Build inputs are copied NEXT TO this file first
 # (snapcraft can't source files outside the project dir):
-#   cp out/make-portable/zip/linux/x64/WhatsWine-linux-x64-1.0.0.zip packaging/snap/
+#   cp out/make-portable/zip/linux/x64/WhatsWine-linux-x64-*.zip packaging/snap/whatswine.zip
 #   cp assets/icon.png packaging/snap/extras/
+#   sed -i "s/^version: .*/version: '$(node -p "require('./package.json').version")'/" packaging/snap/snapcraft.yaml
 # then `snapcraft pack` from packaging/snap (or the snapcraft container in CI).
 # Publish: `snapcraft login && snapcraft upload --release=stable *.snap` (name must be
 # registered first: `snapcraft register whatswine`). See PACKAGING.md for the trademark
 # caveat before publishing to the public Snap Store.
 name: whatswine
-version: '1.0.0'
+version: '0.0.0' # placeholder — stamped from package.json by CI / the recipe above
 summary: Unofficial WhatsApp desktop client
 description: |
   WhatsWine is an unofficial WhatsApp desktop client for Linux — an Electron
@@ -49,7 +50,7 @@ parts:
     plugin: dump
     # Repack the zip produced by `npm run make:linux`; copy it next to this file first.
     # The zip nests everything under WhatsWine-linux-x64/ — organize strips that dir.
-    source: WhatsWine-linux-x64-1.0.0.zip
+    source: whatswine.zip
     organize:
       'WhatsWine-linux-x64/*': whatswine/
     stage-packages:

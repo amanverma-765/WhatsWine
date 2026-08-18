@@ -36,7 +36,9 @@ modules:
       - install -Dm644 com.ark.whatswine.desktop -t /app/share/applications
     sources:
       - type: file
-        path: ../../out/make-portable/zip/linux/x64/WhatsWine-linux-x64-1.0.0.zip
+        # Version-independent name: copy the versioned zip here first —
+        #   cp out/make-portable/zip/linux/x64/WhatsWine-linux-x64-*.zip out/make-portable/zip/linux/x64/WhatsWine-linux-x64.zip
+        path: ../../out/make-portable/zip/linux/x64/WhatsWine-linux-x64.zip
         dest-filename: whatswine.zip
       - type: script
         dest-filename: whatswine.sh

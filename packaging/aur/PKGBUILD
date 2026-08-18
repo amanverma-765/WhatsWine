@@ -5,7 +5,7 @@
 #   git clone ssh://aur@aur.archlinux.org/whatswine-bin.git
 #   makepkg --printsrcinfo > .SRCINFO && git add -A && git commit && git push
 pkgname=whatswine-bin
-pkgver=1.0.0
+pkgver=1.1.0
 pkgrel=1
 pkgdesc="Unofficial WhatsApp desktop client for Linux — Electron shell over WhatsApp Web's Windows-hybrid bundle"
 arch=('x86_64')

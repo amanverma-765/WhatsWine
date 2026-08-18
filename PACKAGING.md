@@ -38,10 +38,11 @@ needs nothing extra.
 ## Release flow (recommended)
 
 1. Bump the version everywhere it is pinned: `package.json` `version`,
-   `packaging/aur/PKGBUILD` `pkgver`, the `<release>` entry in
-   `packaging/flatpak/*.metainfo.xml`, `packaging/snap/snapcraft.yaml` `version`, and the
-   hardcoded `WhatsWine-linux-x64-<ver>.zip` filenames in the flatpak manifest and
-   snapcraft part source.
+   `packaging/aur/PKGBUILD` `pkgver`, and the `<release>` entry in
+   `packaging/flatpak/*.metainfo.xml`. The flatpak/snap manifests are
+   version-independent (fixed `whatswine.zip` / `WhatsWine-linux-x64.zip` staging names;
+   snap `version` is stamped from `package.json` by CI — see the snapcraft.yaml header
+   for the local equivalent).
 2. `npm run make:linux:portable`, smoke the artifacts from `out/make-portable/`
    (`HYBRID_SMOKE=1` on the packaged binary, or install the deb in a container and launch
    — see the docker test scripts pattern: install → `xvfb-run … --no-sandbox` → grep

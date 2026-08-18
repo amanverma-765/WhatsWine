@@ -57,9 +57,10 @@ jobs:
         run: |
           mkdir -p snapwork/extras
           cp packaging/snap/snapcraft.yaml snapwork/
+          sed -i "s/^version: .*/version: '${{ needs.build.outputs.version }}'/" snapwork/snapcraft.yaml
           cp packaging/snap/extras/whatswine.desktop snapwork/extras/
           cp assets/icon.png snapwork/extras/
-          cp dist/zip/linux/x64/WhatsWine-linux-x64-*.zip snapwork/
+          cp dist/zip/linux/x64/WhatsWine-linux-x64-*.zip snapwork/whatswine.zip
       - name: snapcraft pack (destructive, containerized)
         run: |
           docker run --rm -v "$PWD/snapwork:/project" -w /project --entrypoint "" \
@@ -84,6 +85,8 @@ jobs:
         with:
           name: packages
           path: out/make-portable
+      - name: Stage version-independent zip for the manifest
+        run: cp out/make-portable/zip/linux/x64/WhatsWine-linux-x64-*.zip out/make-portable/zip/linux/x64/WhatsWine-linux-x64.zip
       - name: Build flatpak bundle
         uses: flatpak/flatpak-github-actions/flatpak-builder@v6
         with:
